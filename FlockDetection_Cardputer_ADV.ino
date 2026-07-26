@@ -5091,35 +5091,6 @@ void log_detection(const char* type, const char* proto, int rssi, const char* ma
     }
 }
 
-// ============================================================================
-// ============================================================================
-double haversine_m(double lat1, double lon1, double lat2, double lon2) {
-    double dLat = radians(lat2 - lat1);
-    double dLon = radians(lon2 - lon1);
-    double a = sin(dLat/2) * sin(dLat/2)
-             + cos(radians(lat1)) * cos(radians(lat2))
-             * sin(dLon/2) * sin(dLon/2);
-    return 6371000.0 * 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-}
-
-float bearing_to(double lat1, double lon1, double lat2, double lon2) {
-    double dLon = radians(lon2 - lon1);
-    double y = sin(dLon) * cos(radians(lat2));
-    double x = cos(radians(lat1)) * sin(radians(lat2))
-             - sin(radians(lat1)) * cos(radians(lat2)) * cos(dLon);
-    double brng = degrees(atan2(y, x));
-    if (brng < 0) brng += 360.0;
-    return (float)brng;
-}
-
-static const char* bearing_to_compass(float degrees_val) {
-    float norm = fmodf(degrees_val, 360.0f);
-    if (norm < 0.0f) norm += 360.0f;
-    int idx = ((int)(norm + 22.5f) % 360) / 45;
-    static const char* dirs[] = {"N","NE","E","SE","S","SW","W","NW"};
-    return dirs[idx & 7];
-}
-
 // Called under dataMutex (caller already holds it recursively).
 // Feeds an RSSI sample into the tracker, trace buffer, and peak bookmark.
 static void signal_feed_rssi(const char* mac, int rssi) {
