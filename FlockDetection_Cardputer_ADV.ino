@@ -306,49 +306,6 @@ static unsigned long menu_last_frame_ms = 0;
 static float menu_sel_y_f      = 0.0f;   // eased Y position of selection highlight
 static bool  menu_sel_y_seeded = false;   // prevents first-frame pop
 
-// ── Menu section model ──
-struct MenuItem {
-    const char* label;
-    bool        is_toggle;
-    bool        is_danger;
-    int         action_id;
-};
-
-struct MenuSection {
-    const char* label;
-    const MenuItem* items;
-    int count;
-};
-
-static const MenuItem nav_items[] = {
-    {"Scanner",          false, false, 0},
-    {"Signal",           false, false, 1},
-    {"Detections",       false, false, 2},
-    {"GPS Status",       false, false, 3},
-    {"Device Stats",     false, false, 4},
-};
-
-static const MenuItem settings_items[] = {
-    {"Night Mode",       true,  false, 5},
-    {"Mute Beeps",       true,  false, 7},
-    {"Low Power Mode",   true,  false, 6},
-    {"Turbo Mode",       true,  false, 8},
-    {"5GHz Radio",       true,  false, 12},
-};
-
-static const MenuItem tools_items[] = {
-    {"WiFi Config",      false, false, 9},
-    {"Export Mode",      false, false, 10},
-    {"Clear All Stats",  false, true,  11},
-};
-
-static const MenuSection menu_sections[] = {
-    {"NAVIGATE", nav_items,      5},
-    {"SETTINGS", settings_items, 5},
-    {"TOOLS",    tools_items,    3},
-};
-static const int MENU_SECTION_COUNT = 3;
-
 // Low-power mode: reduces scan cadence across WiFi/BLE for longer runtime
 static bool low_power_mode = false;
 
