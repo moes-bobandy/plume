@@ -51,17 +51,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// ── Feature flags ───────────────────────────────────────────────────────────
-// ENABLE_TIMELINE_VIZ 0 removes the third (TIMELINE) scanner visualization.
-// It cost 6,520 bytes of static DRAM: tl_bins (1,000), three 50-float smoothing
-// arrays (600), norm_buf (200), and four 295-float Catmull-Rom interpolation
-// buffers (4,720). That is the largest reclaimable block in the sketch, and on
-// this part the heap is simply whatever DRAM is left after .bss/.data — so the
-// saving lands directly in free heap, which is what export mode's 15 KB gate
-// needs. Set to 1 to restore: all the code is intact below, guarded by this
-// flag. The pre-removal file is also in git at bde8992.
-#define ENABLE_TIMELINE_VIZ 0
-
 // ============================================================================
 // FORWARD DECLARATIONS
 // ============================================================================
@@ -107,11 +96,6 @@ static void parse_wifi_event(struct WifiEvent* ev);
 static void update_channel_histogram();
 static void draw_scanner_viz_scan(unsigned long frame_ms);
 static void draw_scanner_viz_spectrum(unsigned long frame_ms);
-#if ENABLE_TIMELINE_VIZ
-static void draw_scanner_viz_timeline(unsigned long frame_ms);
-static void timeline_init(unsigned long frame_ms);
-static void timeline_shift_bins(unsigned long frame_ms);
-#endif
 static inline void compute_sincos(float angle, float* s, float* c);
 void draw_signal_screen();
 void draw_device_info_screen();
@@ -1326,12 +1310,8 @@ static uint8_t       scanner_flash_proto = 0;  // 0=WiFi 1=BLE — protocol for 
 
 // Cycleable visualization in the scanner's bottom-left panel. 'v' key
 // advances through the modes; the renderer dispatches on this value.
-static int       scanner_viz_mode  = 0;   // 0=SCAN 1=SPECTRUM (2=TIMELINE if enabled)
-#if ENABLE_TIMELINE_VIZ
-static const int SCANNER_VIZ_COUNT = 3;
-#else
+static int       scanner_viz_mode  = 0;   // 0=SCAN 1=SPECTRUM
 static const int SCANNER_VIZ_COUNT = 2;
-#endif
 
 // Per-channel packet counter used by the SPECTRUM viz. Counts are
 // incremented in wifi_sniffer_packet_handler() (single 32-bit store on
@@ -1359,33 +1339,6 @@ static unsigned long     scan_line_last_frame = 0;
 // BLE-active color blend for the spectrum curve. Eases toward 1.0
 // when BLE is scanning, back to 0.0 when WiFi resumes.
 static float             spectrum_ble_blend = 0.0f;
-
-// ── Layered timeline state ─────────────────────────────────────────
-#if ENABLE_TIMELINE_VIZ
-#define TIMELINE_BIN_COUNT    50
-#define TIMELINE_WINDOW_MS    (5UL * 60UL * 1000UL)
-#define TIMELINE_BIN_MS       (TIMELINE_WINDOW_MS / TIMELINE_BIN_COUNT)
-
-struct TimelineBin {
-    uint16_t wifi;
-    uint16_t ble;
-    bool     has_flock;
-    uint8_t  flock_proto;
-    unsigned long timestamp;
-    int16_t  wifi_rssi_sum;
-    int16_t  ble_rssi_sum;
-    uint8_t  wifi_rssi_count;
-    uint8_t  ble_rssi_count;
-};
-
-static TimelineBin   tl_bins[TIMELINE_BIN_COUNT]       = {};
-static float         tl_wifi_smooth[TIMELINE_BIN_COUNT] = {};
-static float         tl_ble_smooth[TIMELINE_BIN_COUNT]  = {};
-static unsigned long tl_last_bin_ms   = 0;
-static unsigned long tl_last_frame_ms = 0;
-static bool          tl_initialized   = false;
-static float         tl_flock_fade[TIMELINE_BIN_COUNT]  = {};
-#endif  // ENABLE_TIMELINE_VIZ
 
 
 // Feed slide-in animation — when scan_local_head changes, all rows
@@ -7538,80 +7491,6 @@ static inline float fast_atan2f(float y, float x) {
 
 
 
-// ── Timeline bin management ───────────────────────────────────────────────
-#if ENABLE_TIMELINE_VIZ
-static void timeline_shift_bins(unsigned long frame_ms) {
-    for (int i = 0; i < TIMELINE_BIN_COUNT - 1; i++) {
-        tl_bins[i]       = tl_bins[i + 1];
-        tl_flock_fade[i] = tl_flock_fade[i + 1];
-    }
-
-    uint16_t wifi_count = 0;
-    uint16_t ble_count  = 0;
-    bool     found_flock = false;
-    uint8_t  flock_proto = 0;
-    int16_t  wifi_rssi_sum = 0;
-    int16_t  ble_rssi_sum  = 0;
-    uint8_t  wifi_rssi_cnt = 0;
-    uint8_t  ble_rssi_cnt  = 0;
-
-    for (int i = 0; i < scan_local_count && i < FEED_SIZE; i++) {
-        int idx = (scan_local_head - i + FEED_SIZE * 2) % FEED_SIZE;
-        FeedEntry& e = scan_local_feed[idx];
-        if (e.mac[0] == '\0') continue;
-        if ((frame_ms - e.timestamp) > TIMELINE_BIN_MS * 2) continue;
-        if (e.proto == 0) {
-            wifi_count++;
-            wifi_rssi_sum += e.rssi;
-            wifi_rssi_cnt++;
-        } else {
-            ble_count++;
-            ble_rssi_sum += e.rssi;
-            ble_rssi_cnt++;
-        }
-        if (e.is_flock && !found_flock) { found_flock = true; flock_proto = e.proto; }
-    }
-
-    if (!found_flock && scanner_flash_ms > 0 &&
-        (frame_ms - scanner_flash_ms) < TIMELINE_BIN_MS) {
-        found_flock = true;
-        flock_proto = scanner_flash_proto;
-    }
-
-    int newest = TIMELINE_BIN_COUNT - 1;
-    tl_bins[newest].wifi            = wifi_count;
-    tl_bins[newest].ble             = ble_count;
-    tl_bins[newest].has_flock       = found_flock;
-    tl_bins[newest].flock_proto     = flock_proto;
-    tl_bins[newest].timestamp       = frame_ms;
-    tl_bins[newest].wifi_rssi_sum   = wifi_rssi_sum;
-    tl_bins[newest].ble_rssi_sum    = ble_rssi_sum;
-    tl_bins[newest].wifi_rssi_count = wifi_rssi_cnt;
-    tl_bins[newest].ble_rssi_count  = ble_rssi_cnt;
-    tl_flock_fade[newest]           = found_flock ? 1.0f : 0.0f;
-    tl_last_bin_ms = frame_ms;
-}
-
-static void timeline_init(unsigned long frame_ms) {
-    for (int i = 0; i < TIMELINE_BIN_COUNT; i++) {
-        tl_bins[i].wifi            = 0;
-        tl_bins[i].ble             = 0;
-        tl_bins[i].has_flock       = false;
-        tl_bins[i].flock_proto     = 0;
-        tl_bins[i].timestamp       = frame_ms - (unsigned long)(TIMELINE_BIN_COUNT - 1 - i) * TIMELINE_BIN_MS;
-        tl_bins[i].wifi_rssi_sum   = 0;
-        tl_bins[i].ble_rssi_sum    = 0;
-        tl_bins[i].wifi_rssi_count = 0;
-        tl_bins[i].ble_rssi_count  = 0;
-        tl_wifi_smooth[i]          = 0.0f;
-        tl_ble_smooth[i]           = 0.0f;
-        tl_flock_fade[i]           = 0.0f;
-    }
-    tl_last_bin_ms = frame_ms;
-    tl_initialized = true;
-}
-#endif  // ENABLE_TIMELINE_VIZ
-
 // ── Export mode info display — replaces scanner content while active ──
 static void draw_export_info() {
     spr.fillSprite(BG_COLOR);
@@ -7729,17 +7608,6 @@ void draw_scanner_screen() {
 
     unsigned long frame_ms = millis();
 
-#if ENABLE_TIMELINE_VIZ
-    // Keep timeline bins populated regardless of which viz is active
-    // so the timeline has history when the user first visits it.
-    if (!tl_initialized) {
-        timeline_init(frame_ms);
-    }
-    if (frame_ms - tl_last_bin_ms >= TIMELINE_BIN_MS) {
-        timeline_shift_bins(frame_ms);
-    }
-#endif
-
     // Step 1: clear
     spr.fillSprite(BG_COLOR);
 
@@ -7769,46 +7637,9 @@ void draw_scanner_screen() {
         }
     }
 
-#if ENABLE_TIMELINE_VIZ
-    // Keep timeline smooth data warm across all modes so TIME starts live.
-    {
-        float tdt = (tl_last_frame_ms == 0) ? 16.0f
-                  : (float)(frame_ms - tl_last_frame_ms);
-        if (tdt > 100.0f) tdt = 100.0f;
-        tl_last_frame_ms = frame_ms;
-        for (int i = 0; i < TIMELINE_BIN_COUNT; i++) {
-            float wifi_target = 0.0f;
-            if (tl_bins[i].wifi_rssi_count > 0) {
-                float avg = (float)tl_bins[i].wifi_rssi_sum / (float)tl_bins[i].wifi_rssi_count;
-                wifi_target = (avg + 90.0f) / 60.0f;
-                if (wifi_target < 0.0f) wifi_target = 0.0f;
-                if (wifi_target > 1.0f) wifi_target = 1.0f;
-                if (tl_bins[i].wifi > 0) { wifi_target += 0.15f; if (wifi_target > 1.0f) wifi_target = 1.0f; }
-            }
-            float ble_target = 0.0f;
-            if (tl_bins[i].ble_rssi_count > 0) {
-                float avg = (float)tl_bins[i].ble_rssi_sum / (float)tl_bins[i].ble_rssi_count;
-                ble_target = (avg + 90.0f) / 60.0f;
-                if (ble_target < 0.0f) ble_target = 0.0f;
-                if (ble_target > 1.0f) ble_target = 1.0f;
-                if (tl_bins[i].ble > 0) { ble_target += 0.15f; if (ble_target > 1.0f) ble_target = 1.0f; }
-            }
-            tl_wifi_smooth[i] = anim_filter(tl_wifi_smooth[i], wifi_target, 400.0f, tdt);
-            tl_ble_smooth[i]  = anim_filter(tl_ble_smooth[i],  ble_target,  400.0f, tdt);
-            if (tl_flock_fade[i] > 0.0f) {
-                tl_flock_fade[i] -= tdt / 3000.0f;
-                if (tl_flock_fade[i] < 0.0f) tl_flock_fade[i] = 0.0f;
-            }
-        }
-    }
-#endif  // ENABLE_TIMELINE_VIZ
-
     switch (scanner_viz_mode) {
         case 0: draw_scanner_viz_scan(frame_ms);         break;
         case 1: draw_scanner_viz_spectrum(frame_ms);     break;
-#if ENABLE_TIMELINE_VIZ
-        case 2: draw_scanner_viz_timeline(frame_ms);     break;
-#endif
     }
     spr.clearClipRect();
 
@@ -8715,284 +8546,6 @@ static void draw_scanner_viz_spectrum(unsigned long frame_ms) {
         spr.print(band_label);
     }
 }
-
-// ── Viz mode 3: LAYERED TIMELINE ─────────────────────────────────────────
-#if ENABLE_TIMELINE_VIZ
-// Max interpolated points: 50 bins × 6 sub-steps + 1 = 295
-#define TL_INTERP_FACTOR  6
-#define TL_SMOOTH_MAX     ((TIMELINE_BIN_COUNT - 1) * TL_INTERP_FACTOR + 1)
-
-static void draw_scanner_viz_timeline(unsigned long frame_ms) {
-    // Smoothing is done in draw_scanner_screen() warm-keep block.
-
-    // ════════════════════════════════════════════════════════════════════
-    // CATMULL-ROM SMOOTHING
-    // ════════════════════════════════════════════════════════════════════
-    // Interpolate 5× between the 50 raw bins → 246 smooth points.
-    // Values are already [0..1] from RSSI mapping; sqrtf lifts valleys.
-
-    // Static: avoid stack overflow — fully overwritten each frame, single-threaded.
-    static float norm_buf[TIMELINE_BIN_COUNT];
-
-    // Inline Catmull-Rom: for each span [i, i+1], emit TL_INTERP_FACTOR
-    // sub-samples using the standard cubic basis.
-    auto catmull_rom_fill = [](const float* src, int src_n, float* dst, int* dst_n) {
-        int out = 0;
-        for (int i = 0; i < src_n - 1; i++) {
-            float p0 = src[max(0, i - 1)];
-            float p1 = src[i];
-            float p2 = src[min(src_n - 1, i + 1)];
-            float p3 = src[min(src_n - 1, i + 2)];
-            for (int s = 0; s < TL_INTERP_FACTOR; s++) {
-                float t  = (float)s / (float)TL_INTERP_FACTOR;
-                float t2 = t * t;
-                float t3 = t2 * t;
-                float v  = 0.5f * ((-p0 + 3.0f*p1 - 3.0f*p2 + p3) * t3
-                                  + (2.0f*p0 - 5.0f*p1 + 4.0f*p2 - p3) * t2
-                                  + (-p0 + p2) * t
-                                  + 2.0f * p1);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;
-                dst[out++] = v;
-            }
-        }
-        dst[out++] = src[src_n - 1];  // final point
-        *dst_n = out;
-    };
-
-    static float smooth_buf[TL_SMOOTH_MAX];
-
-    // ════════════════════════════════════════════════════════════════════════
-    // TRUE ISOMETRIC PROJECTION — 30° axes (cos30 / sin30)
-    // ════════════════════════════════════════════════════════════════════════
-    //
-    // Three axes 120° apart.  Time goes upper-left at 30°, depth goes
-    // upper-right at 30°, value goes straight up.  Value axis X = 0, so
-    // fill columns are perfectly vertical — no skewed rasterization needed.
-
-    const float C30 = 0.866f;
-    const float S30 = 0.5f;
-
-    const float ox = (float)(VIZ_X + 12);           // bottom-left — newest data enters here
-    const float oy = (float)(VIZ_Y + VIZ_H - 6);
-
-    const float T_LEN = 130.0f;   // time span — far end bleeds past upper-right edge
-    const float D_LEN =  24.0f;   // depth span (just enough to separate ribbons)
-    const float V_LEN =  42.0f;   // value span (max curve height)
-
-    const float TDX = +C30 * T_LEN;   // time   → upper-right (old data recedes)
-    const float TDY = -S30 * T_LEN;
-    const float DDX = -C30 * D_LEN;   // depth  → upper-left (iso perspective)
-    const float DDY = -S30 * D_LEN;
-    const float VDY = -V_LEN;         // value  → straight up (VDX = 0)
-
-    #define PX(tt, dtt)      (int)(ox + (tt)*TDX + (dtt)*DDX)
-    #define PY(tt, dtt, vt)  (int)(oy + (tt)*TDY + (dtt)*DDY + (vt)*VDY)
-    #define PXf(tt, dtt)     (ox + (tt)*TDX + (dtt)*DDX)
-    #define PYf(tt, dtt, vt) (oy + (tt)*TDY + (dtt)*DDY + (vt)*VDY)
-
-    // ════════════════════════════════════════════════════════════════════════
-    // ISOMETRIC DIAMOND GRID — fills entire viz panel
-    // ════════════════════════════════════════════════════════════════════════
-    // Two families of parallel lines at 30° from horizontal forming the
-    // classic isometric diamond pattern. Pure integer math — no float
-    // endpoints — prevents the dotted aliasing from sub-pixel rounding.
-
-    uint16_t grid_col = lerp_col16(BG_COLOR, CARD_BORDER,  0.28f);
-
-    const int GRID_SPACING = 12;
-    const int cx = VIZ_X + VIZ_W / 2;
-    const int cy = VIZ_Y + VIZ_H / 2;
-
-    // ── Family A: upper-left lines (parallel to time axis) ──
-    // Direction (-0.866, -0.5). Normal (+0.5, -0.866).
-    // Step origin along normal by k * GRID_SPACING.
-    for (int k = -20; k <= 20; k++) {
-        int ox_a = cx + (k * GRID_SPACING * 500) / 1000;
-        int oy_a = cy - (k * GRID_SPACING * 866) / 1000;
-        int x0 = ox_a - (200 * 866) / 1000;
-        int y0 = oy_a - (200 * 500) / 1000;
-        int x1 = ox_a + (200 * 866) / 1000;
-        int y1 = oy_a + (200 * 500) / 1000;
-        spr.drawLine(x0, y0, x1, y1, grid_col);
-    }
-
-    // ── Family B: upper-right lines (parallel to depth axis) ──
-    // Direction (+0.866, -0.5). Normal (-0.5, -0.866).
-    for (int k = -20; k <= 20; k++) {
-        int ox_b = cx - (k * GRID_SPACING * 500) / 1000;
-        int oy_b = cy - (k * GRID_SPACING * 866) / 1000;
-        int x0 = ox_b - (200 * 866) / 1000;
-        int y0 = oy_b + (200 * 500) / 1000;
-        int x1 = ox_b + (200 * 866) / 1000;
-        int y1 = oy_b - (200 * 500) / 1000;
-        spr.drawLine(x0, y0, x1, y1, grid_col);
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // RIBBON RENDERING — back-to-front (BLE then WiFi)
-    // ════════════════════════════════════════════════════════════════════════
-
-    struct RibbonDef {
-        float    depth;
-        uint16_t curve_col;
-        uint16_t bright_col;
-        uint16_t mid_col;
-        uint16_t dark_col;
-        uint16_t base_col;
-        uint8_t  flock_proto;
-    };
-
-    RibbonDef ribbons[2];
-
-    // WiFi (back)
-    ribbons[0].depth      = 1.0f;
-    ribbons[0].curve_col  = HEADER_COLOR;
-    ribbons[0].bright_col = lerp_col16(BG_COLOR, HEADER_COLOR, 0.50f);
-    ribbons[0].mid_col    = lerp_col16(BG_COLOR, HEADER_COLOR, 0.20f);
-    ribbons[0].dark_col   = lerp_col16(BG_COLOR, lgfx::color565(20, 80, 65), 0.35f);
-    ribbons[0].base_col   = lerp_col16(BG_COLOR, HEADER_COLOR, 0.18f);
-    ribbons[0].flock_proto = 0;
-
-    // BLE (front)
-    ribbons[1].depth      = 0.0f;
-    ribbons[1].curve_col  = PURPLE_COLOR;
-    ribbons[1].bright_col = lerp_col16(BG_COLOR, PURPLE_COLOR, 0.50f);
-    ribbons[1].mid_col    = lerp_col16(BG_COLOR, PURPLE_COLOR, 0.20f);
-    ribbons[1].dark_col   = lerp_col16(BG_COLOR, lgfx::color565(45, 35, 80), 0.35f);
-    ribbons[1].base_col   = lerp_col16(BG_COLOR, PURPLE_COLOR, 0.18f);
-    ribbons[1].flock_proto = 1;
-
-    for (int ri = 0; ri < 2; ri++) {
-        const RibbonDef& R = ribbons[ri];
-        const float d = R.depth;
-
-        // Fill shared norm + smooth buffers for this ribbon
-        for (int i = 0; i < TIMELINE_BIN_COUNT; i++) {
-            int rev = TIMELINE_BIN_COUNT - 1 - i;
-            norm_buf[i] = (ri == 0) ? tl_wifi_smooth[rev] : tl_ble_smooth[rev];
-            if (norm_buf[i] > 1.0f) norm_buf[i] = 1.0f;
-        }
-        int n = 0;
-        catmull_rom_fill(norm_buf, TIMELINE_BIN_COUNT, smooth_buf, &n);
-
-        // ── Step A: Precompute projected coordinates ──
-        static float rx[TL_SMOOTH_MAX];
-        static float cy[TL_SMOOTH_MAX];
-        static float by[TL_SMOOTH_MAX];
-
-        for (int i = 0; i < n; i++) {
-            float tt = -0.10f + (float)i / (float)(n - 1) * 1.30f;
-            rx[i] = PXf(tt, d);
-            cy[i] = PYf(tt, d, smooth_buf[i]);
-            by[i] = PYf(tt, d, 0.0f);
-        }
-
-        // ── Step C: 3-band gradient fill (occludes prior ribbon via overwrite) ──
-        for (int i = 0; i < n - 1; i++) {
-            float x0 = rx[i], x1 = rx[i + 1];
-            float yt0 = cy[i], yt1 = cy[i + 1];
-            float yb0 = by[i], yb1 = by[i + 1];
-            int steps = max(1, (int)ceilf(fabsf(x1 - x0)) + 1);
-            for (int px = 0; px < steps; px++) {
-                float lt = (float)px / (float)steps;
-                int sx  = (int)(x0 + (x1 - x0) * lt);
-                int top = (int)(yt0 + (yt1 - yt0) * lt);
-                int bot = (int)(yb0 + (yb1 - yb0) * lt);
-                int fh  = bot - top;
-                if (fh < 1) continue;
-
-                int bh = max(1, fh * 28 / 100);
-                int mh = max(1, fh * 35 / 100);
-                int dh = fh - bh - mh;
-                if (dh < 0) dh = 0;
-
-                spr.fillRect(sx, top,           1, bh, R.bright_col);
-                spr.fillRect(sx, top + bh,      1, mh, R.mid_col);
-                if (dh > 0)
-                    spr.fillRect(sx, top + bh + mh, 1, dh, R.dark_col);
-            }
-        }
-
-        // ── Step E: Curve line ON TOP (2px thick) ──
-        for (int i = 0; i < n - 1; i++) {
-            spr.drawLine((int)rx[i],   (int)cy[i],
-                         (int)rx[i+1], (int)cy[i+1], R.curve_col);
-            spr.drawLine((int)rx[i],   (int)cy[i] + 1,
-                         (int)rx[i+1], (int)cy[i+1] + 1, R.curve_col);
-        }
-
-        // ── Step E2: Leading edge glow — pulsing dot at newest (index 0) ──
-        {
-            int dot_x = (int)rx[0];
-            int dot_y = (int)cy[0];
-            float pulse = 0.7f + 0.3f * sinf((float)frame_ms * 2.0f * 3.14159f / 600.0f);
-            spr.fillCircle(dot_x, dot_y, 3, lerp_col16(BG_COLOR, R.curve_col, 0.15f * pulse));
-            spr.fillCircle(dot_x, dot_y, 2, lerp_col16(BG_COLOR, R.curve_col, 0.35f * pulse));
-            spr.fillCircle(dot_x, dot_y, 1, lerp_col16(BG_COLOR, R.curve_col, 0.80f * pulse));
-        }
-
-        // ── Step F: Baseline edge ──
-        for (int i = 0; i < n - 1; i++) {
-            spr.drawLine((int)rx[i],   (int)by[i],
-                         (int)rx[i+1], (int)by[i+1], R.base_col);
-        }
-
-        // ── Step G: Flock detection pips ──
-        for (int i = 0; i < TIMELINE_BIN_COUNT; i++) {
-            if (tl_flock_fade[i] <= 0.0f) continue;
-            if (!tl_bins[i].has_flock) continue;
-            if (tl_bins[i].flock_proto != R.flock_proto) continue;
-
-            // Map raw bin index to reversed smoothed array index
-            // (tl_bins[0]=oldest → smooth_pts[n-1], tl_bins[49]=newest → smooth_pts[0])
-            int si = (TIMELINE_BIN_COUNT - 1 - i) * TL_INTERP_FACTOR;
-            if (si >= n) si = n - 1;
-
-            float fade = tl_flock_fade[i];
-            uint16_t pip_col = lerp_col16(BG_COLOR, CAUTION_COLOR, fade * 0.85f);
-            spr.fillCircle((int)rx[si], (int)cy[si] - 1, 2, pip_col);
-        }
-    }
-
-    #undef PX
-    #undef PY
-    #undef PXf
-    #undef PYf
-
-    // Time marks along the isometric baseline: "now" → "-5m"
-    #define TMX(tt) (int)(ox + (tt)*TDX)
-    #define TMY(tt) (int)(oy + (tt)*TDY)
-    {
-        spr.setTextColor(DIM_COLOR, BG_COLOR);
-        spr.setTextSize(TS_MICRO);
-        struct TimeMark { float t_norm; const char* label; };
-        static const TimeMark marks[] = {
-            { 0.0f, "now" },
-            { 0.2f, "-1m" },
-            { 0.4f, "-2m" },
-            { 0.6f, "-3m" },
-            { 0.8f, "-4m" },
-            { 1.0f, "-5m" },
-        };
-        for (int mi = 0; mi < 6; mi++) {
-            float tt = -0.10f + marks[mi].t_norm * 1.30f;
-            int mx = TMX(tt);
-            int my = TMY(tt) + UI_PAD_SM;  // offset below ribbon baseline
-            if (mx < VIZ_X || mx > VIZ_X + VIZ_W) continue;
-            if (my + UI_PAD_SM < VIZ_Y || my > VIZ_Y + VIZ_H - UI_PAD_XS) continue;
-            spr.drawFastVLine(mx, my, 3, DIM_COLOR);
-            int label_w = (int)strlen(marks[mi].label) * ts_char_w(TS_MICRO);
-            int lx = mx - label_w / 2;
-            if (lx < VIZ_X) lx = VIZ_X;
-            spr.setCursor(lx, my + UI_PAD_XS + 2);
-            spr.print(marks[mi].label);
-        }
-    }
-    #undef TMX
-    #undef TMY
-}
-#endif  // ENABLE_TIMELINE_VIZ
 
 // ============================================================================
 // EXPANDED FEED OVERLAY — fullscreen activity feed view
