@@ -30,7 +30,23 @@
 //   example:  D|aa:bb:cc:dd:ee:ff|flock-1a2b|-67|149|85|ssid_fmt
 // ════════════════════════════════════════════════════════════════════════════
 
+// Target guard — mirrors the one in FlockDetection_Cardputer_ADV.ino. This is the
+// C5 half of a two-chip repo; building it with the Cardputer's ESP32-S3 board
+// selected fails on esp_wifi_set_band_mode/WIFI_BAND_MODE_5G_ONLY for reasons
+// that do not obviously say "wrong board". Say it here instead.
 #include <Arduino.h>
+
+// Target guard — mirrors the one in FlockDetection_Cardputer_ADV.ino. MUST sit
+// after <Arduino.h>: the target macros arrive via sdkconfig.h in that chain, and
+// a guard placed above it sees no macros at all and silently never fires.
+// Keyed on the S3 macro rather than !defined(CONFIG_IDF_TARGET_ESP32C5) because
+// this core defines CONFIG_IDF_TARGET_ESP32S3 on S3 builds but does NOT define
+// the matching C5 macro on C5 builds — so the negative test fires on the RIGHT
+// board. Detecting the specific wrong target is what actually works here.
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#error "Wrong board selected. Plume C5 targets the ESP32-C5 (e.g. 'ESP32C5 Dev Module'). If you were just building the Cardputer sketch, switch the IDE board back."
+#endif
+
 #include <WiFi.h>
 #include "esp_wifi.h"
 #include <string.h>
@@ -358,6 +374,128 @@ static void ambient_mark_sent(const uint8_t* mac) {
     g_amb_dedup[slot].used    = true;
 }
 
+// ── Cross-channel wildcard-probe behavioural tracker ────────────────────────
+// Ported from Plume's process_wifi_event_queue(). Tracks which 5 GHz channels
+// each source MAC has emitted a wildcard (empty-SSID) probe request on inside a
+// rolling window. A MAC seen on >= WILDCARD_MIN_CHANNELS distinct channels is
+// exhibiting the channel-hopping scan pattern characteristic of a Flock camera.
+//
+// This matters more here than on the S3. Every captured detection in the
+// flock-back proof set (database/bari.json) was a 5 GHz wildcard probe — 74:4c:a1
+// on channels 36/153/157 — so 5 GHz is where unknown-OUI discovery pays off, and
+// it was the one place Plume had no discovery mechanism at all.
+//
+// Plume's 2.4 GHz version masks by (channel - 1), which only works for channels
+// 1..16 and is useless at 5 GHz where channels run 36..165. Index by POSITION in
+// kChannels[] instead, mapping the nine channels onto bits 0..8.
+//
+// Known-OUI devices are already scored by score_event(); this exists purely to
+// surface UNKNOWN OUIs that behave like cameras so the operator can curate them
+// into the signature list. It deliberately adds NO confidence — ordinary clients
+// wildcard-probe across channels too. Randomized (locally-administered) MACs are
+// skipped: their OUI is synthetic and worthless for curation, and privacy-scanning
+// phones would otherwise dominate the output.
+// Reported on DbgSerial only — LinkSerial carries the framed protocol and must
+// never be polluted with free text.
+#define WILDCARD_MIN_CHANNELS  3
+#define WILDCARD_WINDOW_MS     30000
+#define WILDCARD_TRACKER_SIZE  32
+
+typedef struct {
+    uint8_t  mac[6];
+    uint16_t channel_mask;      // bit N set = wildcard probe seen on kChannels[N]
+    uint32_t first_seen;
+} WildcardProbe;
+static WildcardProbe g_wildcard[WILDCARD_TRACKER_SIZE];
+static int           g_wildcard_count = 0;
+
+static int channel_bit(uint8_t ch) {
+    for (int i = 0; i < kNumChannels; i++) if (kChannels[i] == ch) return i;
+    return -1;
+}
+
+static bool wildcard_probe_observe(const uint8_t* mac, uint8_t channel) {
+    int bit = channel_bit(channel);
+    if (bit < 0) return false;
+    uint32_t now = millis();
+    int slot = -1, oldest = 0;
+
+    for (int i = 0; i < g_wildcard_count; i++) {
+        if (memcmp(g_wildcard[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (g_wildcard[i].first_seen < g_wildcard[oldest].first_seen) oldest = i;
+    }
+
+    if (slot >= 0 && (now - g_wildcard[slot].first_seen) > WILDCARD_WINDOW_MS) {
+        g_wildcard[slot].channel_mask = 0;         // window expired — restart
+        g_wildcard[slot].first_seen   = now;
+    }
+    if (slot < 0) {
+        if (g_wildcard_count < WILDCARD_TRACKER_SIZE) slot = g_wildcard_count++;
+        else slot = oldest;                        // evict oldest entry when full
+        memcpy(g_wildcard[slot].mac, mac, 6);
+        g_wildcard[slot].channel_mask = 0;
+        g_wildcard[slot].first_seen   = now;
+    }
+
+    g_wildcard[slot].channel_mask |= (uint16_t)(1u << bit);
+    return (__builtin_popcount(g_wildcard[slot].channel_mask) >= WILDCARD_MIN_CHANNELS);
+}
+
+// ───────────────────────────── status LED ───────────────────────────────────
+// Mirrors the Cardputer's Plume LED so the pair reads as one instrument: same
+// teal, same 1.2 s breathe (0.15..0.50 duty), same fast pulse for 15 s after a
+// hit. The maths are copied from Plume's LedTask/anim_pulse deliberately — if
+// you retune one, retune both.
+//
+// State is pushed from the S3 as L|on|r|g|b (see c5_push_led_state in Plume), so
+// stealth, night and low-power darken the C5 exactly when they darken the
+// Cardputer. That sync is the point, not a nicety: a C5 breathing away on the
+// Grove port while the Cardputer has gone dark would defeat stealth mode.
+// Defaults to on/teal so a standalone C5 with no S3 attached still lights up.
+//
+// POWER: when the C5 is fed from Grove 5V rather than its own USB-C, this LED is
+// a real load on the Cardputer's cell — breathing teal averages very roughly
+// 10 mA against a ~60 mA charger. Set LED_ENABLED to 0 to compile it out.
+#define LED_ENABLED        1
+#define LED_UPDATE_MS      30       // = Plume's LedTask vTaskDelay
+#define LED_BREATHE_MS     1200     // = UI_PULSE_BREATHE
+#define LED_FAST_MS        300      // = UI_PULSE_FAST
+#define LED_FLASH_MS       15000    // = Plume's detection-flash window
+#define LED_SCALE_PCT      100      // trim if this board's LED is brighter than the Cardputer's
+
+static bool     g_led_on          = true;
+static uint8_t  g_led_r = 77, g_led_g = 219, g_led_b = 194;   // Plume default teal
+static uint32_t g_led_flash_until = 0;
+static uint32_t g_led_last_ms     = 0;
+
+// 0..1 triangle-free sine ramp — identical to Plume's anim_pulse().
+static inline float led_pulse(uint32_t period_ms) {
+    if (period_ms == 0) return 0.5f;
+    float t = (float)(millis() % period_ms) / (float)period_ms;
+    return 0.5f + 0.5f * sinf(t * 2.0f * (float)PI);
+}
+
+static void led_service() {
+#if LED_ENABLED && defined(RGB_BUILTIN)
+    uint32_t now = millis();
+    if (now - g_led_last_ms < LED_UPDATE_MS) return;
+    g_led_last_ms = now;
+
+    uint8_t r = 0, g = 0, b = 0;
+    if (g_led_on) {
+        // Detection flash pulses the full colour fast; idle breathes dimly.
+        float dim = (now < g_led_flash_until)
+                      ? led_pulse(LED_FAST_MS)
+                      : (0.15f + led_pulse(LED_BREATHE_MS) * 0.35f);
+        dim *= (float)LED_SCALE_PCT / 100.0f;
+        r = (uint8_t)((float)g_led_r * dim);
+        g = (uint8_t)((float)g_led_g * dim);
+        b = (uint8_t)((float)g_led_b * dim);
+    }
+    rgbLedWrite(RGB_BUILTIN, r, g, b);
+#endif
+}
+
 // ───────────────────────────── reporting ────────────────────────────────────
 static void send_detection(const uint8_t* mac, const char* name, int rssi,
                            int ch, int conf, const char* methods) {
@@ -365,6 +503,8 @@ static void send_detection(const uint8_t* mac, const char* name, int rssi,
     strlcpy(safe, (name && name[0]) ? name : "Hidden", sizeof(safe));
     for (char* p = safe; *p; p++)
         if (*p == '|' || *p == '\n' || *p == '\r') *p = '_';
+
+    g_led_flash_until = millis() + LED_FLASH_MS;  // mirror Plume's detection flash
 
     uint32_t ep = c5_now_epoch();                 // 0 until first T| sync
     char line[200];
@@ -420,9 +560,21 @@ static void link_handle_line(char* line) {
     while (len > 0 && (line[len-1] == '\r' || line[len-1] == '\n')) line[--len] = '\0';
     if (len == 0) return;
 
-    char* f[4];
-    int nf = link_split(line, f, 4);
+    // 6 fields, not 4: L|on|r|g|b needs five. Raising the cap is safe for the
+    // existing tags (T/SB/SO/SS/SE are all <= 3) and SS patterns never contain
+    // pipes, so a pattern still arrives whole in f[1].
+    char* f[6];
+    int nf = link_split(line, f, 6);
     if (nf < 1) return;
+
+    // L|<on>|<r>|<g>|<b>  — LED state mirrored from the S3 (see led_service).
+    if (strcmp(f[0], "L") == 0 && nf >= 5) {
+        g_led_on = (atoi(f[1]) != 0);
+        g_led_r  = (uint8_t)constrain(atoi(f[2]), 0, 255);
+        g_led_g  = (uint8_t)constrain(atoi(f[3]), 0, 255);
+        g_led_b  = (uint8_t)constrain(atoi(f[4]), 0, 255);
+        return;
+    }
 
     // T|<epoch>
     if (strcmp(f[0], "T") == 0 && nf >= 2) {
@@ -478,6 +630,17 @@ static void process_link_inbound() {
 
 // ───────────────────────────── setup / loop ─────────────────────────────────
 void setup() {
+    // Blank the RGB LED before anything else — Plume's setup() does the same
+    // ("LED: start dark"). A WS2812's internal latch is undefined at power-up and
+    // typically comes up lit, and led_service() does not run until loop(), which
+    // is a delay(300) plus the whole Wi-Fi bring-up away. Without this the LED
+    // shows a stray colour for most of a second on every boot.
+    // NOTE: this only governs the addressable RGB LED. A separate hardwired
+    // power/charge LED (if this board has one) is not software-controllable.
+#if LED_ENABLED && defined(RGB_BUILTIN)
+    rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+#endif
+
     DbgSerial.begin(115200);
     LinkSerial.setRxBufferSize(2048);                    // headroom for a full sig batch
     LinkSerial.begin(LINK_BAUD, SERIAL_8N1);
@@ -510,6 +673,8 @@ void loop() {
         hop_channel(); g_last_hop = now;
     }
 
+    led_service();
+
     static uint32_t last_hb = 0;
     if (now - last_hb >= HEARTBEAT_MS) { last_hb = now; LinkSerial.printf("H|plume-c5|%d\n", PROTOCOL_VERSION); }
 
@@ -520,6 +685,17 @@ void loop() {
             extract_ssid(e->body, e->body_len, e->is_beacon, ssid, sizeof(ssid));
             char methods[64]; uint8_t report_mac[6];
             int conf = score_event(e, ssid, methods, sizeof(methods), report_mac);
+
+            // Behavioural candidate discovery — see wildcard_probe_observe().
+            // Log-only, and only for OUIs we do not already know.
+            if (e->is_probe_req && ssid[0] == '\0' && !(e->addr2[0] & 0x02)
+                && wildcard_probe_observe(e->addr2, e->channel)
+                && mac_prefix_tier(e->addr2) == 0) {
+                DbgSerial.printf("[C5] WILDCARD-CANDIDATE OUI %02x:%02x:%02x RSSI %d ch %u\n",
+                                 e->addr2[0], e->addr2[1], e->addr2[2],
+                                 (int)e->rssi, (unsigned)e->channel);
+            }
+
             if (conf >= ALARM_THRESHOLD) {
                 g_channel_lock_until = millis() + DWELL_ON_HIT_MS;
                 if (should_report(report_mac)) {
