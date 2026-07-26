@@ -8,6 +8,43 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Removed — dead code, second pass
+
+Five commits, no behavioural change. Every item had zero readers.
+
+- **The superseded menu section model** — `MenuItem`, `MenuSection`,
+  `nav_items`, `settings_items`, `tools_items`, `menu_sections`,
+  `MENU_SECTION_COUNT`. Two menu models coexisted; the live one is `MENU_ROWS` +
+  `menu_next_idx()` + the switch in `handle_menu_select()`. The dead one had also
+  drifted — no Charge Mode entry, where `MENU_ROWS` has one — so anyone reading
+  it to understand the menu got the wrong answer. That is the real cost of a
+  second model, not the bytes.
+- **`drawCard()`** — two lines, no callers. `drawPill()`, `drawPill_lcd()`, and
+  `charge_pill()` are all live and untouched.
+- **Ten write-only globals** — `session_wifi`, `session_ble`, `last_cap_rssi`,
+  `last_cap_confidence`, `last_cap_seq_num`, `last_ble_scan`, `last_blip_time`,
+  `scanner_flash_color`, `signal_target_id`, and the
+  `last_rendered_trace_head`/`_count` pair. Most shared a line with live state,
+  so these came out statement-by-statement rather than line-by-line —
+  `session_wifi++` sat beside `lifetime_wifi++` and `session_flock_wifi++`, and
+  the `DEBUG_KEYS` simulate path decrements three live counters on the same two
+  lines. Verified with `DEBUG_KEYS=1` as well as the default build.
+- **The half-built peak-location capture** — `signal_peak_lat`,
+  `signal_peak_lng`, `signal_peak_has_gps` were filled on every new RSSI peak
+  and read by nothing; the display/export half was never built. Kept as its own
+  commit so it can be reverted cleanly if the feature is ever finished.
+  `signal_peak_rssi` and `signal_peak_seq` are live and still drive the hero
+  value and the trace's peak tick.
+- **Two dead locals** — `num_x` in `draw_boot_screen()`, `prev_mode` in the `v`
+  handler.
+
+Reclaimed 24 bytes of DRAM (`.dram0.bss` 57,712 → 57,688; `.dram0.data`
+unchanged) and 180 bytes of flash. Worth recording that the DRAM figure is well
+short of the ~59 bytes those declarations nominally occupy: small variables sit
+inside the alignment padding of their neighbours, so removing one frees no
+addressable space until a whole slot clears. `.data` did not move at all despite
+losing two non-zero-initialised statics.
+
 ### Removed — dead code
 
 Two deletions, no behavioural change to anything reachable.
