@@ -8,6 +8,20 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Changed — boot is ~2 seconds shorter
+
+- **Dropped the title-card hold.** Phase 3 sat on the finished card for a flat
+  2 s of animated grid before the dissolve. The card already fades in during
+  Phase 2 and the chime plays over it, so the hold added nothing but delay
+  between power-on and a working scanner. Phase 4's dissolve is unchanged, and
+  the phase comments are deliberately left numbered 1, 2, 4 to keep the blame
+  trail readable.
+- One consequence to watch: the card is static through the ~650 ms chime, since
+  those are blocking `delay()` calls with no redraw. That pause used to be hidden
+  by the 2 s of animation after it; now it is the last thing on screen before the
+  dissolve. If it reads as a stall, trim the chime's delays rather than putting
+  the hold back.
+
 ### Changed — dead asset, boot dissolve, struct packing
 
 Three unrelated cleanups. **None of the three changes behaviour** — the audio

@@ -11239,24 +11239,6 @@ void setup() {
         M5Cardputer.Speaker.stop();
         M5Cardputer.Speaker.setVolume(is_muted ? 0 : current_volume);
 
-        // Phase 3: Hold on title card (~2 seconds). Rendered through the
-        // sprite pipeline — the old direct-to-LCD fillScreen + full redraw
-        // at 33fps let the panel refresh catch the blank frame constantly,
-        // which flickered and made the drifting grid read as the whole card
-        // sliding in diagonally.
-        {
-            unsigned long hold_start = millis();
-            while (millis() - hold_start < 2000) {
-                M5Cardputer.update();
-                process_wifi_event_queue();
-                feed_commit_pending();
-                spr.fillSprite(BG_COLOR);
-                draw_title_card_overlay(1.0f);
-                push_title_frame();
-                delay(16);
-            }
-        }
-
         // The dissolve renders through render_frame(), which owns the header
         // strip from here on — the grid strip canvas is no longer needed.
         title_strip.deleteSprite();
