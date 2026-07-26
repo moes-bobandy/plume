@@ -40,12 +40,6 @@
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
 #include <math.h>
-#if __has_include("ui_beep.h")
-#include "ui_beep.h"
-#define HAS_UI_BEEP 1
-#else
-#define HAS_UI_BEEP 0
-#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
