@@ -164,10 +164,19 @@ struct RawEvent {
     uint16_t body_len;
     volatile bool ready;
 };
-#define EVENT_QUEUE_SIZE 16
+// 64, not 16. RawEvent is ~147 bytes so this ring is ~9.4KB — trivial on a board
+// with 384KB SRAM at 16% use, and it roughly quadruples burst tolerance before
+// frames start hitting the floor. The C5 has memory to spare and the S3 does not.
+#define EVENT_QUEUE_SIZE 64
 static RawEvent          g_queue[EVENT_QUEUE_SIZE];
 static volatile uint32_t g_write_idx = 0;
 static uint32_t          g_read_idx  = 0;
+// Queue-pressure telemetry. Plume tracks wifi_pkt_enqueued/dropped and reports
+// drop_pct; the C5 dropped frames silently, so there was no way to tell whether
+// dense 5 GHz traffic was overrunning it — which is exactly the unknown that
+// decides whether 5 GHz coverage is worth the extra board.
+static volatile uint32_t g_pkt_enqueued = 0;
+static volatile uint32_t g_pkt_dropped  = 0;
 
 // ── Dedup table — suppress repeats of the same device within a cooldown ──────
 #define DEDUP_SIZE        48
@@ -249,7 +258,7 @@ static void sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (!is_beacon && !is_probe_req) return;
 
     uint32_t idx = g_write_idx % EVENT_QUEUE_SIZE;
-    if (g_queue[idx].ready) return;                  // queue full — drop
+    if (g_queue[idx].ready) { g_pkt_dropped++; return; }   // queue full — drop
 
     RawEvent* e = &g_queue[idx];
     memcpy(e->addr1, hdr->addr1, 6);
@@ -267,6 +276,7 @@ static void sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
     e->ready = true;
     g_write_idx++;
+    g_pkt_enqueued++;
 }
 
 // ───────────────────────────── scoring (mirrors Plume) ──────────────────────
@@ -314,7 +324,11 @@ static int score_event(const RawEvent* e, const char* ssid,
     if (!a1_mc && !a1_rnd && !a1_bc) {
         int a1 = mac_prefix_tier(e->addr1);
         if (a1 > 0 && mac_score == 0) {
-            if (a1 == 1) { conf = SCORE_STRONG; strlcat(methods, "addr1_t1 ", msz); }
+            // RAISE, never assign — see the matching note in Plume's scorer. A bare
+        // assignment demoted an already-DEFINITIVE hit to 60 when addr2's OUI was
+        // unknown but addr1 matched Tier 1, pushing it under ALARM_THRESHOLD.
+        if (a1 == 1) { if (conf < SCORE_STRONG) conf = SCORE_STRONG;
+                       strlcat(methods, "addr1_t1 ", msz); }
             else         { conf += SCORE_WEAK;  strlcat(methods, "addr1_t2 ", msz); }
             memcpy(report_mac, e->addr1, 6);             // key off the device MAC
         }
@@ -372,6 +386,31 @@ static void ambient_mark_sent(const uint8_t* mac) {
     memcpy(g_amb_dedup[slot].mac, mac, 6);
     g_amb_dedup[slot].last_ms = now;
     g_amb_dedup[slot].used    = true;
+}
+
+// ── Radio power state (driven by the S3 over P|<idle>) ──────────────────────
+// Idle drops promiscuous capture, halts channel hopping and lets the modem sleep.
+// Deliberately NOT esp_wifi_stop(): a failed restart would leave this board deaf
+// until a power cycle while still heartbeating, so the S3 would believe it was
+// healthy. This reduces RX duty rather than powering the PHY down outright.
+static bool g_radio_idle = false;
+// Defined here rather than beside g_last_hop so radio_set_idle() can re-pin the
+// channel on resume without a forward declaration giving it external linkage.
+static int g_ch_idx = 0;
+
+static void radio_set_idle(bool idle) {
+    if (idle == g_radio_idle) return;
+    g_radio_idle = idle;
+    if (idle) {
+        esp_wifi_set_promiscuous(false);
+        esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        DbgSerial.println("[C5] radio IDLE (S3 requested low power)");
+    } else {
+        esp_wifi_set_ps(WIFI_PS_NONE);
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_channel(kChannels[g_ch_idx], WIFI_SECOND_CHAN_NONE);
+        DbgSerial.println("[C5] radio FULL");
+    }
 }
 
 // ── Cross-channel wildcard-probe behavioural tracker ────────────────────────
@@ -524,7 +563,6 @@ static void send_detection(const uint8_t* mac, const char* name, int rssi,
 }
 
 // ───────────────────────────── channel hopping ──────────────────────────────
-static int      g_ch_idx   = 0;
 static uint32_t g_last_hop = 0;
 static void hop_channel() {
     g_ch_idx = (g_ch_idx + 1) % kNumChannels;
@@ -573,6 +611,12 @@ static void link_handle_line(char* line) {
         g_led_r  = (uint8_t)constrain(atoi(f[2]), 0, 255);
         g_led_g  = (uint8_t)constrain(atoi(f[3]), 0, 255);
         g_led_b  = (uint8_t)constrain(atoi(f[4]), 0, 255);
+        return;
+    }
+
+    // P|<idle>   0 = full capture, 1 = idle the radio
+    if (strcmp(f[0], "P") == 0 && nf >= 2) {
+        radio_set_idle(atoi(f[1]) != 0);
         return;
     }
 
@@ -669,11 +713,21 @@ void loop() {
 
     process_link_inbound();                              // T| and SB/SO/SS/SE from S3
 
-    if (now >= g_channel_lock_until && now - g_last_hop >= CHANNEL_DWELL_MS) {
+    if (!g_radio_idle && now >= g_channel_lock_until && now - g_last_hop >= CHANNEL_DWELL_MS) {
         hop_channel(); g_last_hop = now;
     }
 
     led_service();
+
+    static uint32_t last_load_log = 0;
+    if (now - last_load_log >= 10000) {
+        last_load_log = now;
+        uint32_t enq = g_pkt_enqueued, drop = g_pkt_dropped;
+        uint32_t pct = (enq + drop) ? (drop * 100UL / (enq + drop)) : 0UL;
+        DbgSerial.printf("[C5] enq=%lu drop=%lu drop_pct=%lu%s\n",
+                         (unsigned long)enq, (unsigned long)drop,
+                         (unsigned long)pct, g_radio_idle ? " (radio idle)" : "");
+    }
 
     static uint32_t last_hb = 0;
     if (now - last_hb >= HEARTBEAT_MS) { last_hb = now; LinkSerial.printf("H|plume-c5|%d\n", PROTOCOL_VERSION); }

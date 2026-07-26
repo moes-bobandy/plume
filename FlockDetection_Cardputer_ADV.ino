@@ -221,6 +221,14 @@ static const uint8_t AMBIENT_BRIGHTNESS = 40;
 // an ESP_RST_SW reset before honoring it, so power-on garbage can't false-fire.
 RTC_NOINIT_ATTR uint32_t charge_mode_request;
 static bool ambient_mode = false;
+// Deeper idle tier below ambient: backlight fully off and the panel asleep.
+// The backlight is the largest controllable load on this board (field note:
+// ~duty 60 is break-even against the 60mA charger), and ambient still holds it
+// at 40 indefinitely. Detection is unaffected — the WiFi callback, BLE worker
+// and scanner all run as background tasks — and a detection raises a toast,
+// which wakes the screen, so nothing is hidden.
+static bool screen_off_mode = false;
+static const unsigned long SCREEN_OFF_TIMEOUT_MS = 10UL * 60UL * 1000UL;
 
 unsigned long vol_overlay_start = 0;
 bool show_vol_overlay = false;
@@ -232,6 +240,12 @@ static volatile bool scanner_ready       = false;  // set true after boot; guard
 static const unsigned long TITLE_CARD_HOLD_MS = 500;   // boot sequence already did the real hold
 static const unsigned long TITLE_CARD_FADE_MS = 1000;
 static int  feed_expanded_selected = 0;
+// Scroll offset for the expanded feed — index of the row drawn at the top.
+// Without this the renderer always started at the newest entry and drew at most
+// FEED_EXPANDED_ROWS, so with FEED_SIZE 8 the oldest 2 entries were unreachable.
+// Mirrors the detections screen's history_selected_idx/history_scroll_offset pair.
+static int  feed_expanded_offset   = 0;
+#define FEED_EXPANDED_ROWS 6   // visible rows; must match the renderer's max_rows
 int  brightness_level = 3;  // 0=dimmest, 1=dim, 2=mid, 3=full — cycled by 'b' key
 
 // ── WiFi Config overlay state ──
@@ -365,6 +379,16 @@ static const int BRIGHTNESS_LEVELS[4] = {32, 64, 128, 255};
 // dim ambient level. stealth (5) is handled separately and is dimmer still.
 static inline uint8_t effective_brightness() {
     return low_power_mode ? AMBIENT_BRIGHTNESS : BRIGHTNESS_LEVELS[brightness_level];
+}
+
+// Low power exists to prioritise charging, so it should shed the backlight — the
+// largest controllable load on this board — far sooner than normal use does.
+// Waiting the normal 2 min / 10 min to dim and blank defeats the point.
+static inline unsigned long current_ambient_timeout_ms() {
+    return low_power_mode ? 30UL * 1000UL : AMBIENT_TIMEOUT_MS;
+}
+static inline unsigned long current_screen_off_timeout_ms() {
+    return low_power_mode ? 2UL * 60UL * 1000UL : SCREEN_OFF_TIMEOUT_MS;
 }
 
 // RGB LED state — color cycles with C key, on/off with L when locator idle
@@ -739,6 +763,10 @@ static inline unsigned long current_dedup_window_ms() {
 // entries in the SD log and fires real detection alarms.
 #define DEBUG_KEYS 0
 
+// Per-second battery trace. Off by default: it costs an extra ADC read plus an
+// isCharging() call every second purely to print a line.
+#define DEBUG_BAT_LOG 0
+
 // Arrow key characters — ADV Cardputer 4-key diamond layout:
 // ';' = up, '.' = down, ',' = left, '/' = right
 #define IS_KEY_UP(c)    ((c) == ';')
@@ -817,6 +845,37 @@ bool sd_available = false;
 static unsigned long last_sd_check_ms = 0;
 static const unsigned long SD_CHECK_INTERVAL_MS = 5000;
 static bool sd_was_available = false;
+
+// Defined here rather than beside the other current_*() helpers because both
+// constants they read (PERSIST_INTERVAL_MS, SD_CHECK_INTERVAL_MS) are declared
+// further down the file than those are.
+//
+// Hot-plug polling is asymmetric, so the interval is too:
+//
+//   card PRESENT — the check is `SD.cardType() == CARD_NONE`, which reads a
+//     cached driver field. No SPI command, no file I/O. Effectively free, so
+//     poll at the normal rate and keep removal detection prompt.
+//
+//   card ABSENT  — every pass runs a full SD.begin(), which its own comment
+//     notes "can take several hundred ms" (hence the WDT reset around it). At a
+//     flat 5s that is a permanent tax on anyone running without a card.
+//
+// So back off on consecutive failures instead of slowing everything down: fast
+// while you might just have inserted one, then settling out once it is clear
+// there is no card coming. Any successful mount resets the streak, which also
+// means a card you pull and re-insert is picked up quickly again.
+static uint8_t sd_mount_fail_streak = 0;
+static inline unsigned long current_sd_check_interval_ms() {
+    if (sd_available) return SD_CHECK_INTERVAL_MS;          // ~free, stay prompt
+    if (sd_mount_fail_streak < 3)  return  5UL * 1000UL;    // just inserted / booted
+    if (sd_mount_fail_streak < 6)  return 15UL * 1000UL;
+    return 60UL * 1000UL;                                   // settled: no card
+}
+// Each persist is a LittleFS + SD write burst (~200-800ms by its own comment).
+// Stretching it in low power saves that energy and the flash wear with it.
+static inline unsigned long current_persist_interval_ms() {
+    return low_power_mode ? 300UL * 1000UL : PERSIST_INTERVAL_MS;
+}
 bool littlefs_available = false;
 volatile int trigger_alarm_confidence = 0;
 volatile int trigger_alarm_source = 0;   // 0 = WiFi, 1 = BLE
@@ -1230,6 +1289,9 @@ struct FeedEntry {
     int8_t   rssi;
     uint8_t  proto;        // 0=WiFi, 1=BLE
     bool     is_flock;
+    bool     is_5ghz;      // WiFi band. Everything from the C5 is 5 GHz by
+                           // construction (WIFI_BAND_MODE_5G_ONLY), the S3's own
+                           // radio is 2.4-only, so no channel parsing is needed.
     unsigned long timestamp;
 };
 static FeedEntry feed_entries[FEED_SIZE];
@@ -1587,6 +1649,12 @@ void LedTask(void* pv) {
         } else {
             led_detect_active = false;
             bool export_on = (export_mode_active || export_connecting);
+            // brightness_level >= 3 is a HARDWARE constraint, not a preference:
+            // the WS2812 is powered off the backlight boost rail (GPIO 38 PWM)
+            // and physically cannot light unless the backlight is at full duty
+            // — see the same note in run_charge_mode(). Below 4/4 the LED is
+            // dark whatever we write to it, so gating here keeps software state
+            // honest instead of driving a pin that can't respond.
             bool show_led = !stealth_mode && !night_mode &&
                             (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
             if (show_led) {
@@ -1626,6 +1694,16 @@ const int32_t SAG_SPEAKER = 80;      // Estimated mV drop during active PCM audi
 // since boot, the same honest cumulative readout Charge Mode uses (+NmV).
 static int32_t session_start_mv = 0;
 
+// Unsagged companion to ema_voltage, used only by the V CHANGE card. That card
+// needs a baseline and a current reading that are directly comparable, and the
+// sag model breaks that: SAG_WIFI_PROMISC is gated on system_fully_booted so it
+// switches on partway through boot, and SAG_BLE_SCAN follows
+// pBLEScan->isScanning() so it toggles forever after. Comparing sagged readings
+// therefore reported +45..80mV the moment boot finished with zero real change,
+// then wobbled +/-35mV as BLE cycled. This EMA tracks the raw ADC only.
+static float ema_voltage_unsagged = 0.0f;
+int32_t get_unsagged_voltage() { return (int32_t)ema_voltage_unsagged; }
+
 int32_t get_filtered_voltage() {
     static uint32_t last_adc_ms = 0;
     static int32_t cached_raw_mv = 0;
@@ -1645,7 +1723,10 @@ int32_t get_filtered_voltage() {
     int32_t sag      = charging ? 0 : current_load_sag_mv;
     float   alpha    = charging ? EMA_ALPHA_CHARGING : EMA_ALPHA;
 
-    int32_t raw_mv = M5Cardputer.Power.getBatteryVoltage() + sag;
+    int32_t adc_mv = M5Cardputer.Power.getBatteryVoltage();
+    int32_t raw_mv = adc_mv + sag;
+    if (ema_voltage_unsagged == 0.0f) ema_voltage_unsagged = (float)adc_mv;
+    ema_voltage_unsagged = (alpha * adc_mv) + ((1.0f - alpha) * ema_voltage_unsagged);
     cached_raw_mv = raw_mv;
     last_adc_ms = now_adc;
     if (ema_voltage == 0.0f) {
@@ -1837,6 +1918,7 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
     uint32_t exit_stable_since = 0;   // 0 = not currently above EXIT threshold
     bool     key_armed        = false;  // require one release before input acts, so the
                                         // 'c' that launched us can't fire instantly.
+    const uint32_t arm_deadline_ms = millis() + 5000;  // see the force-arm below
 
     // ── Charge-progress tracking ─────────────────────────────────────────────
     // The definitive "is it actually charging?" signal. On this hardware the cell
@@ -1919,6 +2001,16 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
 
         bool pressed = M5Cardputer.Keyboard.isPressed();
         if (!pressed) { key_armed = true; }
+        else if (!key_armed && now > arm_deadline_ms) {
+            // isPressed() has been non-zero for 5 s straight, which no real
+            // keypress does. The ADV builds its key list from TCA8418 press/
+            // release events and never rescans, so a lost release event latches
+            // a key "down" permanently — and key_armed would then never become
+            // true, making Charge Mode impossible to leave by hand. Force-arm so
+            // the next pass can exit. Nothing legitimate reaches this branch.
+            Serial.println("[CHARGE] key stuck down >5s - force-arming exit");
+            key_armed = true;
+        }
         else if (key_armed) {
             // ANY observed press exits — there is deliberately no multi-frame
             // debounce. On the ADV the key list is built from TCA8418 FIFO
@@ -1950,7 +2042,12 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
             // not-charging watch powered it down, and the app draws into it
             // immediately on return.
             lcd.wakeup();
-            esp_task_wdt_delete(NULL);
+            // Deliberately do NOT unsubscribe from the task WDT here. The boot
+            // that follows (sprite, SD, GPS probe, LittleFS, radios) has no
+            // watchdog of its own, so dropping protection on the way out turned
+            // any hang in it into a permanent freeze. boot_animate() now pets it
+            // at every checkpoint, and loop()'s service_watchdog() tolerates an
+            // already-subscribed task.
             return;
         }
 
@@ -2112,8 +2209,8 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
                 if (exit_stable_since == 0)                    exit_stable_since = now;
                 else if (now - exit_stable_since >= 4000) {
                     lcd.wakeup();   // no-op unless the stall watch slept the panel
-                    esp_task_wdt_delete(NULL);
                     return;   // app boot owns brightness; charge mode never changes it
+                              // (WDT subscription intentionally retained — see above)
                 }
             } else {
                 exit_stable_since = 0;
@@ -3953,7 +4050,7 @@ void save_stats_to_sd() {
 // as a removal.
 static void sd_check_hotplug() {
     unsigned long now = millis();
-    if (now - last_sd_check_ms < SD_CHECK_INTERVAL_MS) return;
+    if (now - last_sd_check_ms < current_sd_check_interval_ms()) return;
     last_sd_check_ms = now;
 
     // Short timed take — hot-plug is a 5-second poll and gladly retries.
@@ -3978,6 +4075,7 @@ static void sd_check_hotplug() {
         esp_task_wdt_reset();  // SD.begin can take several hundred ms
 
         if (mounted) {
+            sd_mount_fail_streak = 0;   // re-arm fast polling for a future removal
             if (!SD.exists("/PLUME"))          SD.mkdir("/PLUME");
             if (!SD.exists("/PLUME/logs"))     SD.mkdir("/PLUME/logs");
             if (!SD.exists("/PLUME/captures")) SD.mkdir("/PLUME/captures");
@@ -4055,6 +4153,8 @@ static void sd_check_hotplug() {
             Serial.println("[SD] Hot-plug mount succeeded");
             return;
         }
+        // Mount failed — lengthen the retry interval (see the backoff above).
+        if (sd_mount_fail_streak < 200) sd_mount_fail_streak++;
     } else {
         // Probe at the controller level — independent of any file existing.
         // The previous file-probe falsely reported "removed" within the first
@@ -4454,7 +4554,7 @@ static bool feed_recently_pushed(const char* mac) {
 }
 
 static void feed_push_candidate(const char* mac, const char* name, int rssi,
-                                int proto, bool is_flock) {
+                                int proto, bool is_flock, bool is_5ghz = false) {
     if (!mac || mac[0] == '\0') return;
     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
     if (feed_recently_pushed(mac)) { xSemaphoreGiveRecursive(dataMutex); return; }
@@ -4472,6 +4572,7 @@ static void feed_push_candidate(const char* mac, const char* name, int rssi,
     feed_pending.rssi      = (int8_t)rssi;
     feed_pending.proto     = (uint8_t)proto;
     feed_pending.is_flock  = is_flock;
+    feed_pending.is_5ghz   = is_5ghz;
     // timestamp is set in feed_commit_pending() at the moment of commit;
     // setting it here would be dead-stored.
     feed_pending_valid     = true;
@@ -4499,7 +4600,7 @@ static void feed_commit_pending() {
 // Used for confirmed detections (esp. 5 GHz from the C5, which arrive once per
 // 30 s and would otherwise lose the per-window candidate competition).
 static void feed_force_push(const char* mac, const char* name, int rssi,
-                            int proto, bool is_flock) {
+                            int proto, bool is_flock, bool is_5ghz = false) {
     if (!mac || mac[0] == '\0') return;
     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
     if (!feed_recently_pushed(mac)) {              // honor the 30 s dedup
@@ -4511,6 +4612,7 @@ static void feed_force_push(const char* mac, const char* name, int rssi,
         fe.rssi      = (int8_t)rssi;
         fe.proto     = (uint8_t)proto;
         fe.is_flock  = is_flock;
+        fe.is_5ghz   = is_5ghz;
         fe.timestamp = millis();
         if (feed_count < FEED_SIZE) feed_count++;
     }
@@ -5381,7 +5483,12 @@ void process_wifi_event_queue() {
                 if (addr1_mac_score > 0 && mac_score == 0) {
                     // addr1 matched but addr2 didn't — sleeping-device hit.
                     if (addr1_mac_score == 1) {
-                        confidence = SCORE_STRONG;
+                        // RAISE, never assign. A plain `= SCORE_STRONG` demoted an
+                        // already-DEFINITIVE hit (test_flck_cve / ssid_fmt set 100)
+                        // down to 60 whenever addr2's OUI was unknown and addr1
+                        // matched Tier 1 — dropping it below CONFIDENCE_ALARM_
+                        // THRESHOLD and silencing the buzzer on a real detection.
+                        if (confidence < SCORE_STRONG) confidence = SCORE_STRONG;
                         strlcat(methods, "addr1_t1 ", sizeof(methods));
                     } else {
                         confidence += SCORE_WEAK;
@@ -8839,27 +8946,35 @@ void draw_feed_expanded_overlay() {
         spr.setTextSize(TS_BODY);
         spr.setTextColor(ea(ACCENT_COLOR), BG_COLOR);
         spr.setCursor(col_sym, hdr_y); kprint(spr, "DEVICE");
-        spr.setCursor(col_rssi, hdr_y); kprint(spr, "RSSI");
+        spr.setCursor(col_rssi, hdr_y); kprint(spr, "TYPE");
         spr.setCursor(col_sig,  hdr_y); kprint(spr, "SIGNAL");
 
         // Render rows
         const int row_top    = hdr_y + 12;
         const int avail_h    = SPR_H - row_top;
-        const int max_rows   = 6;
+        const int max_rows   = FEED_EXPANDED_ROWS;
         const int row_h      = avail_h / max_rows;
         const int row_pad    = avail_h - (max_rows * row_h);
         const int row_top_adj = row_top + row_pad / 2;
 
-        // Clamp selection to visible rows (handles feed shrinking while overlay is open)
+        // Clamp selection to the whole feed, then pull the scroll window onto it.
+        // Handles the feed shrinking while the overlay is open.
         {
-            int visible_count = local_count < max_rows ? local_count : max_rows;
-            if (visible_count < 1) visible_count = 1;
-            if (feed_expanded_selected >= visible_count)
-                feed_expanded_selected = visible_count - 1;
+            if (feed_expanded_selected > local_count - 1) feed_expanded_selected = local_count - 1;
+            if (feed_expanded_selected < 0)               feed_expanded_selected = 0;
+            int max_off = local_count - max_rows;
+            if (max_off < 0) max_off = 0;
+            if (feed_expanded_offset > max_off) feed_expanded_offset = max_off;
+            if (feed_expanded_offset < 0)       feed_expanded_offset = 0;
+            if (feed_expanded_selected < feed_expanded_offset)
+                feed_expanded_offset = feed_expanded_selected;
+            if (feed_expanded_selected >= feed_expanded_offset + max_rows)
+                feed_expanded_offset = feed_expanded_selected - max_rows + 1;
         }
 
-        // Eased selection highlight Y
-        float sel_target_y = (float)(row_top_adj + feed_expanded_selected * row_h);
+        // Eased selection highlight Y — position within the scroll window.
+        float sel_target_y = (float)(row_top_adj
+                             + (feed_expanded_selected - feed_expanded_offset) * row_h);
         {
             float sdt = (feed_sel_last_frame == 0) ? 0.0f
                       : (float)(local_now - feed_sel_last_frame);
@@ -8880,12 +8995,14 @@ void draw_feed_expanded_overlay() {
         // Clip to row area to prevent slide animation from bleeding into headers
         spr.setClipRect(0, row_top_adj, DISP_W, SPR_H - row_top_adj);
         int rendered = 0;
-        for (int i = 0; i < local_count && rendered < max_rows; i++) {
+        for (int i = feed_expanded_offset; i < local_count && rendered < max_rows; i++) {
             int idx = (local_head - i + FEED_SIZE * 2) % FEED_SIZE;
             FeedEntry& e = scan_local_feed[idx];
             int row_y = row_top_adj + rendered * row_h - expand_slide_offset;
 
-            bool is_sel = (rendered == feed_expanded_selected);
+            // Compare absolute feed index, not row position, now that the
+            // window can start partway down the feed.
+            bool is_sel = (i == feed_expanded_selected);
             uint16_t row_bg = is_sel ? lerp_col16(BG_COLOR, CARD_COLOR, 0.5f) : BG_COLOR;
 
             // Selection highlight
@@ -8931,12 +9048,18 @@ void draw_feed_expanded_overlay() {
             spr.setCursor(name_start_x, row_y + 3);
             spr.print(name_disp);
 
-            // RSSI in dBm with units — right-aligned within the RSSI column
-            char rssi_str[10];
-            snprintf(rssi_str, sizeof(rssi_str), "%ddBm", e.rssi);
+            // Protocol + band, replacing the old dBm readout: the SIGNAL column
+            // beside it is a strictly lossy function of the same e.rssi, so the
+            // number added nothing at a glance. Deliberately TEXT_COLOR and not
+            // a per-band hue — the word already says which band it is, and a
+            // fourth protocol colour would compete with amber, the one signal
+            // that has to stay unmistakable (amber == flock).
+            const char* type_str = e.is_5ghz  ? "5GHz"
+                                 : (e.proto == 1) ? "BLE"
+                                                  : "2.4GHz";
             spr.setTextColor(ea(TEXT_COLOR), ea(row_bg));
             spr.setCursor(col_rssi, row_y + 3);
-            spr.print(rssi_str);
+            spr.print(type_str);
 
             // SIGNAL (spelled out)
             const char* strength_str;
@@ -9207,10 +9330,15 @@ void draw_capture_history_screen() {
     } else {
         // ── List view ─────────────────────────────────────────────────────
         if (hist_total == 0) {
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
+            // Centred both axes, app typescale, white — measured with
+            // textWidth/fontHeight rather than estimated from char counts.
+            const char* msg = "No detections yet";
             spr.setTextSize(TS_BODY);
-            spr.setCursor(8, 30);
-            spr.print("No detections yet.");
+            spr.setTextColor(TEXT_COLOR, BG_COLOR);
+            int mw = spr.textWidth(msg);
+            int mh = spr.fontHeight();
+            spr.setCursor((DISP_W - mw) / 2, (SPR_H - mh) / 2);
+            spr.print(msg);
             return;
         }
 
@@ -10157,7 +10285,7 @@ void draw_device_info_screen() {
     // to mV until the magnitude crosses a volt, which never fits the cell's
     // real range anyway.
     char vdelta_str[10];
-    int32_t dv = (session_start_mv > 0) ? (bat_mv - session_start_mv) : 0;
+    int32_t dv = (session_start_mv > 0) ? (get_unsagged_voltage() - session_start_mv) : 0;
     if (dv <= -1000 || dv >= 1000)
         snprintf(vdelta_str, sizeof(vdelta_str), "%+.2fV", dv / 1000.0f);
     else
@@ -10697,6 +10825,7 @@ static void boot_animate(int pct, const char* status, int /*unused*/ = 0) {
     unsigned long start = millis();
     bool first_frame = true;
     while (millis() - start < ANIM_WINDOW_MS) {
+        esp_task_wdt_reset();   // no-op if this task isn't subscribed
         draw_boot_screen(pct, first_frame ? status : nullptr);
         first_frame = false;
         delay(16);
@@ -10772,6 +10901,12 @@ void c5_link_begin() {
 
 void c5_link_end() {
     if (!c5_link_started) return;
+    // Idle the C5's radio BEFORE closing the port. Once SerialC5 is down we can
+    // never reach that board again, and it would otherwise keep sniffing 5 GHz at
+    // full power indefinitely, transmitting into a dead line — which is why
+    // "5GHz RADIO OFF" previously saved nothing at all.
+    SerialC5.printf("P|1\n");
+    SerialC5.flush();
     SerialC5.end();
     c5_link_started = false;
     c5_last_msg_ms  = 0;
@@ -10821,6 +10956,11 @@ static void c5_push_led_state(bool force) {
     static int last_on = -1, last_r = -1, last_g = -1, last_b = -1;
 
     bool export_on = (export_mode_active || export_connecting);
+    // Keep brightness_level >= 3 here too. The C5's LED has its own supply and
+    // COULD light at any brightness — but the Cardputer's physically cannot
+    // (backlight boost rail), so holding the C5 to the same condition is what
+    // makes the pair behave as one instrument rather than the C5 glowing beside
+    // a Cardputer that has gone dark.
     bool on = !stealth_mode && !night_mode
               && (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
     int r = export_on ? 255 : (int)led_r;
@@ -10832,15 +10972,34 @@ static void c5_push_led_state(bool force) {
     SerialC5.printf("L|%d|%d|%d|%d\n", on ? 1 : 0, r, g, b);
 }
 
+// Push the C5's radio power state. Nothing on this side had ever told the C5
+// anything about power: low_power_mode never reached it, and c5_link_end() only
+// closes OUR uart — the C5 kept sniffing at full duty and transmitting into a
+// dead line. So "5GHz off" and low power both saved exactly nothing on that
+// board, which is the largest single load in the system when it is Grove-powered.
+// P|1 idles its radio, P|0 resumes. Sent on change; unknown tags are ignored in
+// both directions so this needs no PROTOCOL_VERSION bump.
+static void c5_push_power_state(bool force) {
+    if (!c5_link_started) return;
+    static int last_idle = -1;
+    int idle = low_power_mode ? 1 : 0;
+    if (!force && last_idle == idle) return;
+    last_idle = idle;
+    SerialC5.printf("P|%d\n", idle);
+    Serial.printf("[C5] pushed power state: %s\n", idle ? "idle" : "full");
+}
+
 static void service_c5_link() {
     if (!c5_enabled || !c5_link_started) { c5_was_present_for_sync = false; return; }
     bool present = c5_is_present();
     // Cheap change-detect every tick; the full push happens on link-up below.
     c5_push_led_state(false);
+    c5_push_power_state(false);
     if (present && !c5_was_present_for_sync) {
         c5_push_signatures();
         c5_push_time();
         c5_push_led_state(true);   // re-assert after a C5 reboot/reconnect
+        c5_push_power_state(true);
         c5_last_time_push_ms = millis();
     }
     c5_was_present_for_sync = present;
@@ -10881,7 +11040,7 @@ static void c5_handle_line(char* line) {
         const char* name = f[2];
         int         rssi = atoi(f[3]);
         if (mac[0] && !is_mac_whitelisted(mac))
-            feed_push_candidate(mac, name[0] ? name : "Hidden", rssi, 0, false);
+            feed_push_candidate(mac, name[0] ? name : "Hidden", rssi, 0, false, true);
         return;
     }
 
@@ -10901,7 +11060,7 @@ static void c5_handle_line(char* line) {
         if (mac[0] == '\0')          return;
         if (is_mac_whitelisted(mac)) return;       // honor the user's whitelist
 
-        feed_force_push(mac, name, rssi, 0, true);   // 5 GHz hit into the live feed
+        feed_force_push(mac, name, rssi, 0, true, true);   // 5 GHz hit into the live feed
 
         // Same pipeline as a 2.4 GHz hit. proto "WIFI" keeps the alarm/visual
         // routing identical; the 5 GHz channel (36-165) marks the band, and
@@ -10975,6 +11134,43 @@ void setup() {
     plume_is_adv = (M5.getBoard() == m5::board_t::board_M5CardputerADV);
     Serial.printf("[BOOT] board = %s\n",
                   plume_is_adv ? "Cardputer ADV" : "Cardputer (regular, no GPS)");
+
+    // ── Keyboard health check (ADV only) ────────────────────────────────────
+    // Adafruit_TCA8418::begin() returns only the result of its LAST register
+    // write, and TCA8418KeyboardReader::begin() takes an early return when that
+    // is false — skipping matrix(), flush(), attachInterruptArg() AND
+    // enableInterrupts(). The result is a keyboard that is silently dead for the
+    // entire session: no ISR fires, so _isr_flag never sets, so update() always
+    // returns early and isPressed() is permanently 0. An I2C write is most
+    // likely to fail on a marginal rail — which is exactly when Charge Mode
+    // runs, and why Charge Mode could become impossible to wake from.
+    //
+    // enableInterrupts() is the LAST call in that chain and sets
+    // GPI_IEN|KE_IEN (0x03) in CFG (0x01), so those bits being set proves the
+    // whole init completed. Read them back and retry if not.
+    //
+    // detachInterrupt FIRST: Keyboard::begin() destroys the old reader while its
+    // ISR is still registered with that object as its argument, so an interrupt
+    // landing in that window would write to freed memory.
+    if (plume_is_adv) {
+        const uint8_t  KB_ADDR = 0x34;   // TCA8418_DEFAULT_ADDR
+        const uint8_t  KB_CFG  = 0x01;   // TCA8418_REG_CFG
+        const uint8_t  KB_IEN  = 0x03;   // GPI_IEN | KE_IEN
+        const gpio_num_t KB_INT = GPIO_NUM_11;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            uint8_t cfg = M5.In_I2C.readRegister8(KB_ADDR, KB_CFG, 400000);
+            if ((cfg & KB_IEN) == KB_IEN) {
+                if (attempt) Serial.printf("[KB] recovered on attempt %d (cfg=0x%02X)\n",
+                                           attempt + 1, cfg);
+                break;
+            }
+            Serial.printf("[KB] TCA8418 not configured (cfg=0x%02X) - re-init %d/3\n",
+                          cfg, attempt + 1);
+            detachInterrupt(digitalPinToInterrupt(KB_INT));
+            delay(50);                       // let the boot current surge pass
+            M5Cardputer.Keyboard.begin();
+        }
+    }
 
     // Drop to the lowest clock for the brown-out-prone early boot. The ESP32-S3
     // powers on at the board's full configured clock (typ. 240 MHz), so without
@@ -11051,6 +11247,10 @@ void setup() {
             // Only a deliberate 'c'-request tops up to full; auto entries resume
             // at the safe-to-run floor so a low cell isn't held longer than needed.
             run_charge_mode(requested, brownout);
+            // Charge Mode drops to 40 MHz; the 80 MHz set for the brown-out-prone
+            // boot window happens ABOVE this gate, so without this the whole
+            // post-charge boot ran at half clock.
+            setCpuFrequencyMhz(80);
             Serial.println("[BOOT] leaving Charge Mode -> normal boot");
         }
     }
@@ -11105,7 +11305,6 @@ void setup() {
     M5Cardputer.Display.setRotation(1);
     brightness_level = 3;
     apply_color_palette();
-    session_start_mv = get_filtered_voltage();   // V CHANGE card baseline
 
     // Ease the screen in: brightness ramps from 0 → target over UI_ANIM_NORMAL
     // while the title intro animation runs simultaneously. Reads as a "wakeup"
@@ -11128,10 +11327,6 @@ void setup() {
             delay(FADE_STEP_MS);
         }
     }
-
-    boot_animate(5 + random(0, 4), "opening serial");
-
-    boot_animate(12 + random(0, 3), "searching for SD");
 
     // Route a dedicated SPI3 instance to the Cardputer's SD pins. 15 MHz is
     // the FAT32 sweet spot — slow enough for marginal cards, fast enough for
@@ -11229,7 +11424,7 @@ void setup() {
         sd_available = false;
         Serial.println("[SD] Mount failed. Verify card is FAT32 and fully inserted.");
     }
-    boot_animate(35, sd_available ? "mounting SD card" : "no SD found");
+    boot_animate(12, sd_available ? "checking SD card" : "no SD card");
     // Seed hot-plug state so the first poll doesn't fire a spurious "mounted" toast
     sd_was_available = sd_available;
     last_sd_check_ms = millis();
@@ -11251,6 +11446,12 @@ void setup() {
     Serial.print(F(" BLE:"));     Serial.println(rt_name_count);
 
     delay(100);
+    // Label this BEFORE the probe below: gps_detect_baud() can take ~7s (2 sweeps
+    // x 3 bauds x 1.2s) and posting the message afterwards left the boot screen
+    // frozen on the previous step's label for the whole wait, which reads as a
+    // hang. The bar parks here, but at least it says what it is waiting for.
+    boot_animate(25, plume_is_adv ? "finding GPS" : "no GPS module");
+
     // Auto-detect the GNSS baud. On success the port is left open at the
     // detected rate; on failure we open at the module default and let the
     // GPS task keep trying (covers a slow-to-emit cold start).
@@ -11268,11 +11469,9 @@ void setup() {
     }
     delay(WIFI_MODE_SETTLE_MEDIUM_MS);
     WiFi.mode(WIFI_STA); delay(WIFI_MODE_SETTLE_SHORT_MS);
-    boot_animate(38 + random(0, 4), "connecting GPS");
-    boot_animate(46 + random(0, 4), "drawing interface");
+    boot_animate(50, "waking radios");
 
     // Sprite was already created at the top of setup().
-    boot_animate(50 + random(0, 5), "preparing display");
 
     // Prime the EMA filter to eliminate startup ADC noise before taking the baseline
     for (int i = 0; i < 20; i++) {
@@ -11280,19 +11479,16 @@ void setup() {
         get_filtered_voltage();
         delay(2);
     }
-    boot_animate(58 + random(0, 3), "calibrating battery");
 
     // Stay at the low boot clock — the BLE worker only blocks on a queue until
     // the radio is brought up later, so 240 MHz here would just stack a CPU
     // surge onto a charging cell and risk a boot-time brownout.
-    boot_animate(62 + random(0, 3), "queuing Bluetooth");
     ble_event_queue = xQueueCreate(BLE_POOL_SIZE, sizeof(uint8_t));
     // Stack must cover the matched-device path: scoring + BLE-pcap build +
     // log_detection() (dataMutex, CSV formatting, and SD/FatFS writes, which
     // alone can burn 1-2KB). 2752 overflowed there — only a *matched* device
     // dives this deep, which is why unmatched feed traffic never crashed.
     xTaskCreatePinnedToCore(ble_worker_task, "BLEWorker", 6144, NULL, 1, &BLEWorkerHandle, 1);
-    boot_animate(68, "starting Bluetooth");
 
     memset(seen_mac_table, 0, sizeof(seen_mac_table));
 
@@ -11346,7 +11542,7 @@ void setup() {
     if (c5_enabled)        c5_link_begin();   // bring up 5 GHz C5 link if enabled
     Serial.printf("[BOOT] Free heap after LittleFS: %u\n",
                   (unsigned)esp_get_free_heap_size());
-    boot_animate(78 + random(0, 3), "loading session");
+    boot_animate(62, "loading session");
 
     // First-boot WiFi credential initialization from #defines if flash is empty
     if (strlen(export_ssid) == 0 && strlen(EXPORT_WIFI_SSID) > 0) {
@@ -11357,7 +11553,6 @@ void setup() {
         strncpy(export_pass, EXPORT_WIFI_PASS, sizeof(export_pass) - 1);
         export_pass[sizeof(export_pass) - 1] = '\0';
     }
-    boot_animate(82 + random(0, 3), "reading credentials");
 
     lifetime_boots++;
     if (littlefs_available) {
@@ -11394,7 +11589,7 @@ void setup() {
     delay(WIFI_MODE_SETTLE_MEDIUM_MS);
     Serial.printf("[BOOT] Free heap after WiFi promisc: %u\n",
                   (unsigned)esp_get_free_heap_size());
-    boot_animate(88, "starting sniffer");
+    boot_animate(80, "starting 2.4GHz WiFi");
 
     // NimBLE — complete before scanner screen appears
     NimBLEDevice::init(""); NimBLEDevice::setMTU(23); NimBLEDevice::setPowerLevel(BLE_TX_POWER);
@@ -11409,7 +11604,7 @@ void setup() {
     // default cache can hit 10–20 KB in a busy RF environment for no benefit.
     pBLEScan->setMaxResults(0);
     last_ble_restart_ms = millis();
-    boot_animate(96, "arming scanner");
+    boot_animate(95, "starting Bluetooth");
 
     // Tasks
     last_channel_hop = millis(); last_ble_scan = millis(); last_sd_flush = millis(); last_persist_save = millis();
@@ -11418,6 +11613,13 @@ void setup() {
         xTaskCreatePinnedToCore(GPSLoopTask, "GPSTask", 2048, NULL, 1, &GPSTaskHandle, 0);
     last_user_input_ms = millis();
     system_fully_booted = true;
+
+    // V CHANGE baseline — taken HERE, not earlier. It has to sit after the EMA
+    // prime loop above (whose comment says "before taking the baseline", which
+    // the old capture site 169 lines earlier defeated) and after the sag model
+    // reaches steady state. Unsagged, so it stays comparable to the card's
+    // current reading no matter what the sag terms do afterwards.
+    session_start_mv = get_unsagged_voltage();
 
     // Spawn the LED task at priority 1 on Core 1 — must come after WiFi+BLE
     // are up so RMT/radio contention is avoided.
@@ -11434,8 +11636,6 @@ void setup() {
     // WiFi/BLE callbacks capture in the background while the title card is up.
     // The scanner is then already populated and live the instant it's revealed.
     scanner_ready = true;
-
-    boot_animate(100, "ready");
 
     // Gate: wait for the WiFi sniffer to confirm radios are up (~15 packets) or
     // 4 seconds, whichever comes first. Pump event queues during the wait so the
@@ -11854,20 +12054,62 @@ static void service_heap_health() {
     }
 }
 
+// Leave ambient (and the deeper screen-off tier) and restore the panel. Order
+// matters: screen-off sleeps the panel, so it must be woken before a brightness
+// change means anything.
+static void display_wake_from_idle() {
+    if (screen_off_mode) {
+        screen_off_mode = false;
+        M5Cardputer.Display.wakeup();
+        screen_dirty = true;
+    }
+    ambient_mode = false;
+    M5Cardputer.Display.setBrightness(effective_brightness());
+}
+
 static void service_ambient_mode() {
     // Enter ambient mode after sustained idle
     if (!ambient_mode && !stealth_mode && !toast_active && !signal_active && !export_mode_active &&
-        (millis() - last_user_input_ms) > AMBIENT_TIMEOUT_MS) {
+        (millis() - last_user_input_ms) > current_ambient_timeout_ms()) {
         ambient_mode = true;
         show_feed_expanded = false;
-        M5Cardputer.Display.setBrightness(AMBIENT_BRIGHTNESS);
+        // Clamp: AMBIENT_BRIGHTNESS (40) is HIGHER than BRIGHTNESS_LEVELS[0]
+        // (32), so at 1/4 the old unconditional set made idling *brighter* and
+        // cost power instead of saving it.
+        uint8_t amb = effective_brightness();
+        if (amb > AMBIENT_BRIGHTNESS) amb = AMBIENT_BRIGHTNESS;
+        M5Cardputer.Display.setBrightness(amb);
+    }
+
+    // Deeper tier: kill the backlight entirely after a longer idle.
+    if (ambient_mode && !screen_off_mode && !stealth_mode && !toast_active
+        && !signal_active && !export_mode_active
+        && (millis() - last_user_input_ms) > current_screen_off_timeout_ms()) {
+        screen_off_mode = true;
+        M5Cardputer.Display.setBrightness(0);
+        M5Cardputer.Display.sleep();
     }
 
     // Exit ambient if conditions change from non-input sources
     if (ambient_mode && (signal_active || export_mode_active || toast_active)) {
-        ambient_mode = false;
-        M5Cardputer.Display.setBrightness(effective_brightness());
+        display_wake_from_idle();
     }
+}
+
+// Re-assert GPS standby while in low power. gps_standby() fires once at the
+// toggle, but the $PCAS12 window unit is ambiguous across CASIC firmwares (ms
+// vs s) — if milliseconds, 65535 is only ~65s and the receiver silently resumes
+// acquiring at 25-40mA for the rest of the session, which is the single largest
+// load on this board. Charge Mode already re-issues for exactly this reason
+// (see its gps_renap counter); low power never did, so its biggest claimed
+// saving may not have been happening at all.
+static void service_gps_standby_refresh() {
+    if (!plume_is_adv || !low_power_mode) return;
+    static unsigned long last_renap_ms = 0;
+    unsigned long now_g = millis();
+    if (now_g - last_renap_ms < 30000UL) return;
+    last_renap_ms = now_g;
+    gps_standby(true);
 }
 
 static void service_gps_timezone() {
@@ -12028,18 +12270,17 @@ static void service_ble_restart() {
 static void redraw_now() { draw_current_screen(); render_frame(); }
 
 static void service_stealth_and_stats_render() {
+    if (screen_off_mode) return;   // panel asleep — compositing would be wasted
     if (ambient_mode) {
         // Render the normal scanner screen at reduced framerate (~15 fps).
         // Same layout, same feed, same viz — just dimmed via backlight.
         static unsigned long last_ambient_draw = 0;
         unsigned long now_amb = millis();
         if (now_amb - last_ambient_draw > 66) {
-            // Force scanner screen if user idled on another screen
-            if (current_screen != 0) {
-                current_screen = 0;
-                feed_anim_prev_head = -1;
-                feed_anim_shift_ms  = 0;
-            }
+            // Deliberately NOT forcing the scanner screen here. Ambient used to
+            // yank you back to screen 0 after the idle timeout, which meant
+            // sitting on Stats or GPS for two minutes silently lost your place.
+            // Ambient is a brightness/framerate state, not a navigation event.
             redraw_now();
             last_ambient_draw = now_amb;
         }
@@ -12102,7 +12343,11 @@ static void service_stealth_and_stats_render() {
             // Stats screen caps at 30 fps to suppress the SPI/scan-line
             // tearing that 60 fps pushes produced. Other animated screens
             // stay at 60 fps where the artifact isn't visible.
-            unsigned long min_frame_ms = (current_screen == 4) ? 33 : 15;
+            // Low power caps at ~20fps: compositing the 54KB sprite and pushing
+            // it over SPI is the heaviest CPU work in the app, and 60fps buys
+            // nothing when the point of the mode is to charge.
+            unsigned long min_frame_ms = low_power_mode ? 50
+                                       : ((current_screen == 4) ? 33 : 15);
             if (now - last_fast_anim >= min_frame_ms) {
                 redraw_now();
                 last_fast_anim = now;
@@ -12133,8 +12378,7 @@ static void handle_keyboard_input() {
         last_user_input_ms = millis();
         screen_dirty = true;
         if (ambient_mode) {
-            ambient_mode = false;
-            M5Cardputer.Display.setBrightness(effective_brightness());
+            display_wake_from_idle();
             // Same I2S wake as the BtnA path.
             M5Cardputer.Speaker.stop();
         }
@@ -12368,6 +12612,8 @@ static void handle_keyboard_input() {
             else if (IS_KEY_UP(c)) {
                 if (show_feed_expanded) {
                     if (feed_expanded_selected > 0) feed_expanded_selected--;
+                    if (feed_expanded_selected < feed_expanded_offset)
+                        feed_expanded_offset = feed_expanded_selected;
                     draw_current_screen(); render_frame();
                     continue;
                 }
@@ -12390,9 +12636,13 @@ static void handle_keyboard_input() {
             }
             else if (IS_KEY_DOWN(c)) {
                 if (show_feed_expanded) {
-                    int max_sel = min(scan_local_count, 6) - 1;
+                    // Range over the WHOLE feed, not the visible 6 — the old
+                    // min(count, 6) cap made the oldest entries unreachable.
+                    int max_sel = scan_local_count - 1;
                     if (max_sel < 0) max_sel = 0;
                     if (feed_expanded_selected < max_sel) feed_expanded_selected++;
+                    if (feed_expanded_selected >= feed_expanded_offset + FEED_EXPANDED_ROWS)
+                        feed_expanded_offset = feed_expanded_selected - FEED_EXPANDED_ROWS + 1;
                     draw_current_screen(); render_frame();
                     continue;
                 }
@@ -12699,6 +12949,7 @@ static void handle_keyboard_input() {
                         show_feed_expanded = true;
                         feed_expand_ms = millis();
                         feed_expanded_selected = 0;
+                        feed_expanded_offset   = 0;   // open at the newest entry
                     }
                     draw_current_screen();
                     render_frame();
@@ -12943,6 +13194,7 @@ void loop() {
 
     int32_t loop_mv = get_filtered_voltage();
 
+#if DEBUG_BAT_LOG
     static uint32_t _bat_dbg_ms = 0;
     if (millis() - _bat_dbg_ms >= 1000) {
         _bat_dbg_ms = millis();
@@ -12952,6 +13204,7 @@ void loop() {
             (int)current_load_sag_mv,
             (int)M5Cardputer.Power.isCharging());
     }
+#endif
 
     service_battery_warnings(loop_mv);
 
@@ -13005,8 +13258,7 @@ void loop() {
     if (M5Cardputer.BtnA.wasClicked() && !stealth_mode) {
         last_user_input_ms = millis();
         if (ambient_mode) {
-            ambient_mode = false;
-            M5Cardputer.Display.setBrightness(effective_brightness());
+            display_wake_from_idle();
             // Wake the I2S peripheral from idle so the next tone() call
             // (often a UI click or alarm chime) doesn't hit a DMA assertion.
             M5Cardputer.Speaker.stop();
@@ -13038,7 +13290,7 @@ void loop() {
     handle_pending_backslash();
 
     if (millis() - last_time_save >= 1000) { xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY); lifetime_seconds++; xSemaphoreGiveRecursive(dataMutex); last_time_save = millis(); }
-    if (millis() - last_persist_save >= PERSIST_INTERVAL_MS) {
+    if (millis() - last_persist_save >= current_persist_interval_ms()) {
         // Only advance the gate when the spawn actually took. If heap was
         // too low to allocate the task stack, retry on the next loop tick
         // (~10ms) instead of waiting another full PERSIST_INTERVAL.
@@ -13057,6 +13309,8 @@ void loop() {
     service_sd_hotplug();
 
     service_gps_timezone();
+
+    service_gps_standby_refresh();
 
     service_ambient_mode();
 
