@@ -10019,7 +10019,6 @@ void draw_boot_screen(int pct, const char* status_text = nullptr) {
     // Centered layout: (DISP_H - total_h) / 2 where total_h = num(16) + gap(13) + bar(20) + gap(18) + status(8) = 75
     const int num_y = (DISP_H - 75) / 2;          // = 30
     const int num_w = 80;
-    const int num_x = (DISP_W - num_w) / 2;
     const int num_h = 16;
 
     const int status_y = num_y + num_h + 13 + 20 + 18;  // = 97
@@ -12193,7 +12192,6 @@ static void handle_keyboard_input() {
             }
             else if (c == 'v') {
                 if (current_screen == 0) {
-                    int prev_mode = scanner_viz_mode;
                     scanner_viz_mode = (scanner_viz_mode + 1) % SCANNER_VIZ_COUNT;
                     screen_dirty = true;
                     menu_click();
