@@ -2,6 +2,164 @@
 
 All notable changes to Plume are recorded here.
 
+## v1.2
+
+Detection accuracy, power, and a UI pass. Both firmwares changed — the Cardputer
+sketch and `c5-sniffer/` each need flashing.
+
+### Fixed — detection
+
+- **The addr1 branch could DOWNGRADE a confirmed detection.** It assigned
+  `SCORE_STRONG` rather than raising, so a hit already at 100 (the `test_flck`
+  CVE probe, or the `Flock-<hex>` SSID format) fell to 60 whenever the
+  transmitter OUI was unknown and addr1 matched Tier 1 — under the alarm
+  threshold, so it logged silently and never sounded. Fixed in both firmwares.
+- **The −80 dBm cutoff discarded known Flock silicon.** Both the WiFi and BLE
+  paths bailed before any signature check ran, capping detection range blind. A
+  known OUI now overrides it; `check_mac_prefix()` is 54 three-byte `memcmp`s so
+  the check is effectively free. The WiFi path tests addr1 too, since the
+  sleeping-device technique keys off the receiver address.
+- Names arriving over the C5 link are scrubbed. `clean_device_name_char()` had
+  only ever been applied to Plume's own WiFi and BLE paths, so 5 GHz names
+  reached the UI and CSV with control characters intact.
+
+### Changed — signature table, verified against three registries
+
+Every Tier-1 OUI was resolved against IEEE `oui.txt` (MA-L), `manuf2` (56,505,
+incl. MA-M/MA-S) and Ringmast4r/OUI-Master-Database (88,873 merged, incl. IAB and
+CID plus Wireshark and Nmap). Only one of the nine was Flock Safety.
+
+- **Tier 1 is now `b4:1e:52` alone** — all three sources agree it is the only OUI
+  Flock has ever registered. (Beware `8c:1f:64`, which is "Flock Audio Inc.", an
+  unrelated pro-audio company.)
+- Eight demoted to Tier 2: Liteon, Shenzhen Shixuntong, **Espressif**
+  (`a0:b7:65` — at Tier 1 this alarmed on Plume's own ESP32-S3 and the ESP32-C5
+  sniffer), and three Silicon Laboratories prefixes. They still match and still
+  log; they can no longer alarm on proximity alone, only on camera behaviour.
+- `4c:6e:44` resolved as an IEEE Registration Authority **subdivided** block, so
+  a 3-byte match identifies no vendor at all. `d8:a0:d8` has zero matches across
+  all 88,873 merged entries — genuinely unassigned. Both kept at Tier 2 for
+  logging only.
+- Alarm threshold 75 → 70, so a Tier-2 OUI wildcard-probing at close range
+  (`SCORE_STRONG` 60 + RSSI bonus 10) now alarms. Previously the 45 Tier-2
+  prefixes could log but never beep. Side effects, both close-range only: a
+  Tier-1 OUI and an `addr1_t1` sleeping-device hit now alarm unaided.
+- Added a bare `"flock"` SSID pattern, and `cc:cc:cc` (Tier 2, unvalidated).
+
+### Fixed — Charge Mode wake
+
+- **The CPU clock is restored to 80 MHz on exit.** Charge Mode drops to 40 MHz
+  and the 80 MHz for the brown-out-prone window is set *above* the gate, so the
+  entire post-charge boot ran at half clock. This was the actual cause of the
+  apparent freeze after pressing a key.
+- The wait-for-release loop is time-boxed and feeds the WDT. On the ADV the key
+  list is built from TCA8418 events and never rescanned, so a lost release event
+  latched a key down forever and that loop spun into a panic reboot.
+- Any observed press exits. `update()` drains one FIFO event per call, so a quick
+  tap read as pressed on one frame and released the next — the old two-frame
+  debounce silently ate short taps.
+- Boot-time TCA8418 health check. `Adafruit_TCA8418::begin()` returns only its
+  *last* register write, and the reader takes an early return on failure —
+  skipping `matrix()`, `flush()`, `attachInterruptArg()` **and**
+  `enableInterrupts()`. The keyboard was then silently dead for the whole
+  session, likeliest on a marginal rail, which is exactly when Charge Mode runs.
+  Now verified by reading `CFG` back, and retried up to 3×.
+- The task WDT is retained across the Charge Mode exit and `boot_animate()` pets
+  it at every checkpoint. Protection had been dropped precisely as control
+  entered a boot phase with no watchdog of its own.
+- Titles render as standard app pills instead of hand-rolled letter-spacing.
+
+### Fixed — telemetry that was lying
+
+- **V CHANGE reported roughly +73 mV at boot with no real change.** The baseline
+  was captured 308 lines before `system_fully_booted`, so with sag = 0, while
+  every later reading carried 45–80 mV of sag compensation. It also drifted
+  ±35 mV as BLE scanning cycled, and was taken 169 lines *before* the EMA prime
+  loop whose own comment says it exists "before taking the baseline". Now an
+  unsagged EMA, sampled once the sag model reaches steady state.
+
+### Changed — power
+
+- New screen-off idle tier: backlight off and panel asleep after 10 min idle
+  (2 min in low power), rendering suspended. Detection is unaffected — it all
+  runs in background tasks — and a detection raises a toast, which wakes the
+  screen.
+- **GPS standby is re-asserted every 30 s in low power.** It was fired once at
+  the toggle, but the `$PCAS12` window unit is ambiguous across CASIC firmwares —
+  if milliseconds, `65535` is only ~65 s and the receiver silently resumed
+  acquiring at 25–40 mA. Charge Mode already defended against this; low power
+  never did.
+- SD hot-plug backoff (5 s → 15 s → 60 s on consecutive failures, all modes). The
+  absent-card path runs a full `SD.begin()` that its own comment calls "several
+  hundred ms", previously every 5 s forever on a cardless device.
+- Low power also slows the idle timeouts and the persist cadence (60 s → 5 min),
+  and caps rendering at ~20 fps.
+- Ambient brightness is clamped: `AMBIENT_BRIGHTNESS` (40) exceeds
+  `BRIGHTNESS_LEVELS[0]` (32), so at 1/4 idling used to make the screen *brighter*.
+- The per-second `[bat]` trace is gated behind `DEBUG_BAT_LOG` (off).
+
+### Changed — C5 co-processor
+
+- **Plume can now idle the C5's radio** (`P|<idle>`). Nothing had ever told the
+  C5 anything about power: `low_power_mode` never reached it, and
+  `c5_link_end()` only closed Plume's own UART while the C5 kept sniffing at full
+  duty into a dead line. So "5GHz RADIO OFF" and low power both saved nothing on
+  that board.
+- Cross-channel wildcard-probe tracker ported to 5 GHz, indexed by position in
+  `kChannels[]` (Plume's version masks by `channel - 1`, meaningless above 16).
+  Every captured detection in the flock-back proof set was a 5 GHz wildcard
+  probe, so this was the one place with no unknown-OUI discovery at all.
+- Status LED mirrors Plume's exactly, including the brightness gate — that gate
+  is a *hardware* constraint on the Cardputer (its WS2812 runs off the backlight
+  boost rail), so the C5 is held to it deliberately to keep the pair in step.
+- Byte-based OUI matching (was `snprintf` plus `strncmp` per frame), event queue
+  16 → 64 slots, and enq/drop/drop_pct telemetry — dropped frames had been
+  entirely silent.
+- Target guards on both sketches: building one with the other's board selected
+  now fails with one clear message instead of two misleading ones.
+
+### Changed — UI
+
+- The feed shows protocol and band (`2.4GHz` / `5GHz` / `BLE`) in place of the
+  dBm column, which was redundant — the `SIGNAL` column beside it is a lossy
+  function of the same value. Deliberately not colour-coded: a fourth protocol
+  hue would compete with amber, which means flock.
+- **The expanded feed can reach every entry.** `FEED_SIZE` is 8, the renderer
+  draws 6, and there was no scroll offset — the oldest two were unreachable.
+- Signal → Target throughout, and removed from the screen carousel: it is only
+  meaningful once something is selected, so it is reached from the feed or the
+  menu rather than by cycling onto an empty screen. Content starts with the
+  device name instead of a duplicate TARGET label.
+- Idle no longer yanks you back to the scanner from Stats or GPS.
+- Two-press confirm on CLEAR STATS, the one irreversible menu action.
+- Header pills: `A`/`N`/`S` dropped (each announced a state already visible on
+  screen) and nothing is left on `DIM_COLOR`.
+- The 5GHz menu toggle and the `5G` badge now reflect that low power has idled
+  the radio, rather than claiming coverage that is not happening. `c5_enabled`
+  remains the user's preference and is never rewritten behind their back.
+- Boot screen condensed from 16 steps to 7, about 1.1 s faster, every label
+  naming work that actually happens ("calibrating battery" had been labelling a
+  20-iteration EMA prime loop).
+- Detections empty state centred on both axes, in white.
+- `TEXT_LEFT` 4 → 8, with a symmetric right margin on the status pills.
+
+### Known issues
+
+- Charge Mode's flat-read check is an ADC-frozen detector only. It cannot see an
+  I2C or keyboard failure: the battery is ADC1/GPIO10 with no I2C involved, while
+  the TCA8418 is the only device on the bus. The boot-time health check now
+  covers the keyboard case separately.
+- Stealth mode still emits key clicks on the WiFi-config screen — five bare
+  `Speaker.tone()` calls there bypass `beep()` and its stealth/mute guards.
+  Fixing it would also unblock powering the I2S amp down when muted.
+- The charge screen maps voltage through the discharge curve while charging, so
+  the percentage reads optimistically, and `CHARGE_MODE_FULL_MV` (4150) tops out
+  at 95%.
+- Tier-2 OUIs now alarm on wildcard-probe behaviour at close range, which
+  includes three Silicon Laboratories prefixes and Liteon. If that proves noisy,
+  remove `cc:cc:cc` first (unvalidated, no capture behind it), then consider
+  restoring the 75 threshold and raising only the `wildcard_probe_t2` path to 65.
+
 ## v1.1
 
 Charge Mode reliability. Every item below is in `run_charge_mode()` or its boot

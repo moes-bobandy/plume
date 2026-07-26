@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="colors_and_type.css">
+  <style>
+    body { margin: 0; background: #06080d; }
+    a { color: var(--fd-header); }
+    a:hover { color: color-mix(in srgb, var(--fd-header) 70%, #fff); }
+  </style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:28px; padding:48px 56px 64px; background:#06080d; font-family:'Cozette', ui-monospace, monospace; color:var(--fd-text);">
+
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span style="background:var(--fd-header); color:var(--fd-bg); font-size:13px; font-weight:700; padding:3px 8px; border-radius:3px;">6a</span>
+      <span style="font-size:11px; letter-spacing:0.18em; color:var(--fd-header);">PLUME — SIGNAL SCREEN</span>
+    </div>
+    <div style="font-size:13px; max-width:680px; line-height:1.6; color:var(--fd-dim);">RSSI proximity tracker for a targeted device. Native 240&nbsp;×&nbsp;135. Peak-led readout, continuous peak-hold meter, smooth-filled 2-minute trace. See README.md for exact coordinates and formulas.</div>
+  </div>
+
+  <div style="display:flex; gap:48px; flex-wrap:wrap; align-items:flex-start;">
+
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="font-size:11px; letter-spacing:0.18em; color:var(--fd-dim);">TRACKING — ON DEVICE</div>
+      <x-import component-from-global-scope="Cardputer" from="./Cardputer.jsx" scale="2" hint-size="540,380">
+        <div style="position:relative; width:240px; height:135px; background:var(--fd-bg); overflow:hidden; font-family:'Cozette', ui-monospace, monospace;">
+          <div style="position:absolute; left:4px; top:4px; font-size:11px; letter-spacing:0.08em; color:var(--fd-header);">SIGNAL</div>
+          <div style="position:absolute; right:4px; top:4px; display:flex; gap:2px; align-items:center;">
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-caution) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-caution) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">L</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid var(--fd-accent); background:var(--fd-accent); color:var(--fd-bg); font-size:8px; line-height:9px; letter-spacing:0.02em;">D3</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">B8</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">W12</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">78%</span>
+          </div>
+          <div style="position:absolute; left:0; right:0; top:18px; height:1px; background:var(--fd-card-border);"></div>
+          <div style="position:absolute; left:6px; top:28px; display:flex; align-items:center; gap:5px;">
+            <svg width="10" height="10" viewBox="-1 -1 12 12" style="display:block;"><polygon points="5,0 10,5 5,10 0,5" fill="none" stroke="var(--fd-purple)" stroke-width="1.6"></polygon></svg>
+            <span style="font-size:16px; letter-spacing:0.02em; color:var(--fd-text);">FS-85068D</span>
+          </div>
+          <div style="position:absolute; right:6px; top:29px; height:11px; padding:0 5px; border-radius:3px; background:var(--fd-header); color:var(--fd-bg); font-size:9px; letter-spacing:0.08em; display:flex; align-items:center;">TRACKING</div>
+          <div style="position:absolute; left:6px; top:50px; display:flex; align-items:baseline; gap:5px;">
+            <span style="font-size:26px; line-height:1; color:var(--fd-text);">-48</span>
+            <span style="font-size:11px; color:var(--fd-text);">dBm</span>
+            <span style="font-size:9px; letter-spacing:0.12em; color:var(--fd-text); margin-left:2px;">(peak)</span>
+          </div>
+          <div style="position:absolute; right:6px; top:58px; font-size:13px; letter-spacing:0.06em; color:var(--fd-text);">SEEN 4s AGO</div>
+          <div style="position:absolute; left:6px; top:83px; width:228px; height:6px; border-radius:3px; background:var(--fd-card); overflow:hidden;">
+            <div style="position:absolute; left:0; top:0; bottom:0; width:78%; border-radius:3px; background:var(--fd-header);"></div>
+          </div>
+          <div style="position:absolute; left:199px; top:79px; width:2px; height:14px; background:var(--fd-text);"></div>
+          <svg viewBox="0 0 240 135" width="240" height="135" style="position:absolute; inset:0;">
+            <polygon points="6,118 18,117 30,119 42,116.1 54,115.1 66,116.6 78,114.2 90,113.2 102,114.6 114,112.2 126,111.8 138,112.7 150,110.8 162,109.8 174,111.3 186,109.4 198,107.4 210,109.8 222,108.9 234,109.4 234,130 6,130" fill="var(--fd-header)" fill-opacity="0.14"></polygon>
+            <polyline points="6,118 18,117 30,119 42,116.1 54,115.1 66,116.6 78,114.2 90,113.2 102,114.6 114,112.2 126,111.8 138,112.7 150,110.8 162,109.8 174,111.3 186,109.4 198,107.4 210,109.8 222,108.9 234,109.4" fill="none" stroke="var(--fd-header)" stroke-width="1.5"></polyline>
+            <line x1="198" y1="104" x2="198" y2="130" stroke="var(--fd-text)" stroke-width="0.75"></line>
+            <line x1="6" y1="130" x2="234" y2="130" stroke="var(--fd-card-border)" stroke-width="0.4"></line>
+            <circle cx="234" cy="109.4" r="2.5" fill="var(--fd-text)"></circle>
+          </svg>
+        </div>
+      </x-import>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="font-size:11px; letter-spacing:0.18em; color:var(--fd-dim);">STALE</div>
+      <div style="position:relative; width:480px; height:270px; border-radius:6px; background:var(--fd-bg); box-shadow:inset 0 0 0 1px var(--fd-card-border); overflow:hidden;">
+        <div style="position:absolute; top:0; left:0; width:240px; height:135px; transform:scale(2); transform-origin:top left; background:var(--fd-bg); font-family:'Cozette', ui-monospace, monospace;">
+          <div style="position:absolute; left:4px; top:4px; font-size:11px; letter-spacing:0.08em; color:var(--fd-header);">SIGNAL</div>
+          <div style="position:absolute; right:4px; top:4px; display:flex; gap:2px; align-items:center;">
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-caution) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-caution) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">L</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid var(--fd-accent); background:var(--fd-accent); color:var(--fd-bg); font-size:8px; line-height:9px; letter-spacing:0.02em;">D3</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">B8</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">W12</span>
+            <span style="font-family:var(--fd-font-mono); padding:1px 3px; border-radius:3px; border:1px solid color-mix(in srgb, var(--fd-dim) 40%, var(--fd-bg)); background:color-mix(in srgb, var(--fd-dim) 18%, var(--fd-bg)); color:var(--fd-text); font-size:8px; line-height:9px; letter-spacing:0.02em;">78%</span>
+          </div>
+          <div style="position:absolute; left:0; right:0; top:18px; height:1px; background:var(--fd-card-border);"></div>
+          <div style="position:absolute; left:6px; top:28px; display:flex; align-items:center; gap:5px;">
+            <svg width="10" height="10" viewBox="-1 -1 12 12" style="display:block;"><polygon points="5,0 10,5 5,10 0,5" fill="none" stroke="var(--fd-purple)" stroke-width="1.6"></polygon></svg>
+            <span style="font-size:16px; letter-spacing:0.02em; color:var(--fd-text);">FS-85068D</span>
+          </div>
+          <div style="position:absolute; right:6px; top:29px; height:11px; padding:0 5px; border-radius:3px; background:var(--fd-caution); color:var(--fd-bg); font-size:9px; letter-spacing:0.08em; display:flex; align-items:center;">STALE</div>
+          <div style="position:absolute; left:6px; top:50px; display:flex; align-items:baseline; gap:5px;">
+            <span style="font-size:26px; line-height:1; color:var(--fd-text);">-48</span>
+            <span style="font-size:11px; color:var(--fd-text);">dBm</span>
+            <span style="font-size:9px; letter-spacing:0.12em; color:var(--fd-text); margin-left:2px;">(peak)</span>
+          </div>
+          <div style="position:absolute; right:6px; top:58px; font-size:13px; letter-spacing:0.06em; color:var(--fd-caution);">SEEN 47s AGO</div>
+          <div style="position:absolute; left:6px; top:83px; width:228px; height:6px; border-radius:3px; background:var(--fd-card); overflow:hidden;"></div>
+          <div style="position:absolute; left:199px; top:79px; width:2px; height:14px; background:var(--fd-text);"></div>
+          <svg viewBox="0 0 240 135" width="240" height="135" style="position:absolute; inset:0;">
+            <polygon points="6,111.8 18,112.7 30,111.3 42,113.2 54,114.6 66,114.2 78,116.6 90,116.1 102,118 114,117 126,119.4 138,120.9 150,122.8 162,125.2 174,127 186,128.5 198,129.2 210,129.6 222,130 234,130 234,130 6,130" fill="var(--fd-caution)" fill-opacity="0.14"></polygon>
+            <polyline points="6,111.8 18,112.7 30,111.3 42,113.2 54,114.6 66,114.2 78,116.6 90,116.1 102,118 114,117 126,119.4 138,120.9 150,122.8 162,125.2 174,127 186,128.5 198,129.2 210,129.6 222,130 234,130" fill="none" stroke="var(--fd-caution)" stroke-width="1.5"></polyline>
+            <line x1="6" y1="130" x2="234" y2="130" stroke="var(--fd-card-border)" stroke-width="0.4"></line>
+          </svg>
+        </div>
+      </div>
+      <div style="font-size:12px; max-width:480px; line-height:1.55; color:var(--fd-dim);">Accent shifts to amber, trace sinks to the floor, meter empties. Peak stays white; its chart tick is dropped because the held peak predates the window.</div>
+    </div>
+
+  </div>
+</section>
+</x-dc>
+</body>
+</html>

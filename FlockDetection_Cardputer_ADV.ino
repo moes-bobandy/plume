@@ -1,5 +1,5 @@
 ﻿// ============================================================================
-// PLUME v1.1
+// PLUME v1.2
 // ============================================================================
 
 #include <M5Cardputer.h>
@@ -367,6 +367,14 @@ static const int MENU_SECTION_COUNT = 3;
 
 // Low-power mode: reduces scan cadence across WiFi/BLE for longer runtime
 static bool low_power_mode = false;
+
+// Is 5 GHz actually being scanned right now? Low power idles the C5's radio via
+// P|1 while deliberately leaving c5_enabled and the link up — so the user's
+// setting survives and coverage resumes the instant low power ends. But the menu
+// toggle and the header 5G badge both read raw state and so claimed 5 GHz
+// coverage that was not happening. This is the effective state; c5_enabled
+// remains the user's preference and is never rewritten behind their back.
+static inline bool c5_scanning_now() { return c5_enabled && !low_power_mode; }
 static bool turbo_mode_active = false;
 // Geometric spacing (~2x per step) reads as even perceptual jumps; 32 is the
 // old dim tier (40) lowered 20%.
@@ -765,8 +773,8 @@ static inline unsigned long current_dedup_window_ms() {
 // shows a version derives from these (stats card, boot screen, export page
 // badge and footer), so no other source line needs touching.
 // Also update: CHANGELOG.md, README.md footer, and the file header above.
-#define VERSION_STRING "PLUME v1.1"
-#define VERSION_SHORT  "v1.1"
+#define VERSION_STRING "PLUME v1.2"
+#define VERSION_SHORT  "v1.2"
 
 // Set to 1 to enable the 'x' key simulation trigger (development only).
 // MUST be 0 for release builds — simulation creates permanent fake
@@ -1421,11 +1429,22 @@ int signal_peak_rssi = -120;
 #define SIG_TRACE_SIZE        60          // 2 minutes at 2-second intervals
 #define SIG_TRACE_INTERVAL_MS 2000
 
-// Signal bar and trace normalization range — single source of truth.
-// Values below RSSI_VIS_FLOOR clamp to bottom; above RSSI_VIS_CEIL clamp to top.
-#define RSSI_VIS_FLOOR (-70)
-#define RSSI_VIS_CEIL  (-30)
-#define RSSI_VIS_RANGE (RSSI_VIS_CEIL - RSSI_VIS_FLOOR)  // 40
+// Signal meter and trace normalization ranges — single source of truth.
+// Two ceilings on purpose: the meter runs a little hotter than the trace so a
+// very close target still has bar left to travel after the plot has topped out.
+// The floor is shared, and is also what a gap sample writes so a dropout reads
+// as a fall to the bottom rather than a frozen line.
+#define RSSI_VIS_FLOOR   (-95)
+#define RSSI_TRACE_CEIL  (-45)
+#define RSSI_TRACE_RANGE (RSSI_TRACE_CEIL - RSSI_VIS_FLOOR)  // 50
+#define RSSI_METER_CEIL  (-40)
+#define RSSI_METER_RANGE (RSSI_METER_CEIL - RSSI_VIS_FLOOR)  // 55
+
+// Freshness gates, in seconds since the last frame/advertisement from the target.
+// LOST is the shorter of the two by design: the live elements (meter fill, trace
+// dot) go quiet quickly, while the labelling waits longer before crying STALE.
+#define SIG_LOST_AFTER_S   10
+#define SIG_STALE_AFTER_S  30
 
 struct SigTraceEntry {
     int8_t rssi;  // raw dBm value; -128 = floor/gap
@@ -1441,6 +1460,15 @@ static int           last_rendered_trace_count = 0;
 static unsigned long sig_trace_last_frame_ms = 0;
 static float         signal_bar_smooth = 0.0f;
 static bool          signal_bar_seeded = false;
+
+// Monotonic count of trace samples written since the target was set, and the
+// value it held when the peak was recorded. The ring only remembers the last
+// SIG_TRACE_SIZE samples, so comparing signal_peak_seq against
+// (sig_trace_total - sig_trace_count) tells us whether the peak is still on
+// screen — if it has scrolled off, the peak tick is dropped rather than
+// re-pointed at the in-window maximum, which would contradict the hero value.
+static long signal_peak_seq  = -1;
+static long sig_trace_total  = 0;
 
 // ── Peak GPS bookmark ──
 static double signal_peak_lat     = 0.0;
@@ -5145,10 +5173,15 @@ static void signal_feed_rssi(const char* mac, int rssi) {
         sig_trace_head = (sig_trace_head + 1) % SIG_TRACE_SIZE;
         if (sig_trace_count < SIG_TRACE_SIZE) sig_trace_count++;
         sig_trace_last_sample = now;
+        sig_trace_total++;
     }
 
     if (rssi > signal_peak_rssi) {
         signal_peak_rssi = rssi;
+        // Reports arrive faster than the 2 s trace cadence, so pin the peak to
+        // the most recently written sample. Worst case the tick sits one sample
+        // (~4 px) off, which is inside the width of the tick itself.
+        signal_peak_seq = sig_trace_total - 1;
         if (gps.location.isValid() && gps.location.age() < 2000) {
             double lat = gps.location.lat();
             double lng = gps.location.lng();
@@ -5177,6 +5210,8 @@ void signal_start(const char* mac, const char* name, const char* type = "", int 
     signal_bar_seeded = false;
 
     signal_peak_rssi = -120;
+    signal_peak_seq  = -1;
+    sig_trace_total  = 0;
     signal_peak_lat = 0.0; signal_peak_lng = 0.0; signal_peak_has_gps = false;
 
     signal_tracker_idx = -1;
@@ -5206,6 +5241,8 @@ void signal_stop() {
     signal_target_id      = 0;
 
     signal_peak_rssi = -120;
+    signal_peak_seq  = -1;
+    sig_trace_total  = 0;
     signal_peak_lat = 0.0; signal_peak_lng = 0.0; signal_peak_has_gps = false;
 
     signal_tracker_idx = -1;
@@ -6298,7 +6335,7 @@ void draw_header_lcd(int screen_num, const char* name_override) {
             { signal_active,    "L", CAUTION_COLOR },
             { low_power_mode,    "P", ACCENT_COLOR },
             { turbo_mode_active, "T", CAUTION_COLOR },
-            { c5_is_present(),   "5G", HEADER_COLOR },
+            { c5_is_present() && !low_power_mode, "5G", HEADER_COLOR },
         };
         for (int i = 0; i < 4; i++) {
             if (!badges[i].active) continue;
@@ -7035,7 +7072,7 @@ static void draw_menu_overlay() {
                         : (idx == 6) ? low_power_mode
                         : (idx == 7) ? is_muted
                         : (idx == 8) ? turbo_mode_active
-                        : c5_enabled;
+                        : c5_scanning_now();   // effective, not raw c5_enabled
                 if (on) {
                     int pw = 14, ph = 9;
                     int px = DISP_W - pw - UI_PAD_SM - 4;
@@ -7314,6 +7351,15 @@ void handle_menu_select() {
             set_turbo_mode(!turbo_mode_active);
             break;
         case 12:
+            if (low_power_mode) {
+                // Display already shows OFF (c5_scanning_now), so toggling here
+                // would either be a no-op the user cannot see or would quietly
+                // change a preference that stays suppressed. Say why instead —
+                // same pattern as LOW POWER LOCKS DIM for brightness.
+                set_toast_direct("LOW POWER IDLES 5GHZ", TOAST_WARNING);
+                screen_dirty = true;
+                break;
+            }
             c5_enabled = !c5_enabled;
             if (c5_enabled) { c5_link_begin(); set_toast_direct("5GHz RADIO ON",  TOAST_SUCCESS); }
             else            { c5_link_end();   set_toast_direct("5GHz RADIO OFF", TOAST_NEUTRAL); }
@@ -9491,27 +9537,33 @@ void draw_capture_history_screen() {
 }
 
 
+// ── Signal screen ──────────────────────────────────────────────────────────
+// Answers one question: is this thing getting stronger or weaker, and how close
+// have I ever gotten? Deliberately no distance readout — RSSI is relative, so
+// any foot/metre figure would be a lie. Everything here is dBm, percent of
+// scale, or elapsed time.
+//
+// Coordinates below are sprite-local. The sprite starts at CONTENT_Y, so a
+// screen-space y from the design spec maps to (y - CONTENT_Y) here.
 void draw_signal_screen() {
     unsigned long frame_ms = millis();
 
     // ── Snapshot state under mutex ──
     bool  active;
     char  target_mac[18], target_name[65], target_type[16];
-    int   target_id, peak_rssi, tracker_idx;
+    int   peak_rssi, tracker_idx;
     unsigned long newest_ms;
     int   target_rssi = 0;
     bool  has_rssi    = false;
-    int   tracker_sample_count = 0;
-    int   tracker_samples[RSSI_TRACK_SAMPLES];
     static SigTraceEntry trace_snap[SIG_TRACE_SIZE];
-    int trace_head, trace_count;
+    int  trace_head, trace_count;
+    long peak_seq, trace_total;
 
     if (!take_data_mutex()) return;
     active       = signal_active;
     safe_copy(target_mac,  signal_target_mac,  sizeof(target_mac));
     safe_copy(target_name, signal_target_name, sizeof(target_name));
     safe_copy(target_type, signal_target_type, sizeof(target_type));
-    target_id    = signal_target_id;
     peak_rssi    = signal_peak_rssi;
     tracker_idx  = signal_tracker_idx;
     newest_ms    = signal_newest_sample_ms;
@@ -9520,13 +9572,13 @@ void draw_signal_screen() {
         && strncmp(rssi_tracker[tracker_idx].mac, target_mac, 17) == 0) {
         int sc = rssi_tracker[tracker_idx].sample_count;
         target_rssi = rssi_tracker[tracker_idx].samples[sc - 1];
-        tracker_sample_count = sc;
-        memcpy(tracker_samples, rssi_tracker[tracker_idx].samples, sc * sizeof(int));
-        has_rssi = (frame_ms - newest_ms < 15000);
+        has_rssi    = true;
     }
     memcpy(trace_snap, sig_trace, sizeof(sig_trace));
     trace_head  = sig_trace_head;
     trace_count = sig_trace_count;
+    peak_seq    = signal_peak_seq;
+    trace_total = sig_trace_total;
     give_data_mutex();
 
     // ── Per-frame dt — computed once, shared by all smoothers ──
@@ -13302,6 +13354,7 @@ void loop() {
                 sig_trace_head = (sig_trace_head + 1) % SIG_TRACE_SIZE;
                 if (sig_trace_count < SIG_TRACE_SIZE) sig_trace_count++;
                 sig_trace_last_sample = millis();
+                sig_trace_total++;
             }
             xSemaphoreGiveRecursive(dataMutex);
         }

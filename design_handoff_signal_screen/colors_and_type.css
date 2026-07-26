@@ -1,0 +1,154 @@
+/* ============================================================================
+   FLOCK DETECTOR — Colors & Type
+   Source of truth: FlockDetection_Cardputer_ADV.ino (apply_color_palette())
+   240×135 hardware display. RGB565 colors are converted to RGB888 here.
+   ============================================================================ */
+
+@font-face {
+  font-family: "Cozette";
+  src: url("./fonts/CozetteVector.ttf") format("truetype");
+  font-display: swap;
+}
+@font-face {
+  font-family: "VT323";
+  src: local("VT323"), url("./fonts/VT323-Regular.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "Share Tech Mono";
+  src: local("Share Tech Mono"), url("./fonts/ShareTechMono-Regular.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: local("JetBrains Mono"),
+       url("./fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  /* ── DAY PALETTE — Analogous Cool (teal + blue-violet + amber) ─────────
+     Mirrors apply_color_palette() on the ui-design branch. */
+  --fd-bg:           #050a14; /* near-black navy */
+  --fd-card:         #1d3258; /* card / overlay fill */
+  --fd-card-border:  #2e4670; /* hairline outline */
+  --fd-header:       #4ddbc2; /* teal — chrome + confirmation */
+  --fd-text:         #e8efff; /* off-white body */
+  --fd-dim:          #95a5b8; /* secondary metadata (lifted for readability) */
+  --fd-accent:       #4ddbc2; /* alias of --fd-header — confirmed/selected */
+  --fd-caution:      #ffb547; /* amber — alerts, flock hits, EXP/GPS pills */
+  --fd-purple:       #8b7cdb; /* blue-violet — BLE differentiation */
+
+  /* Aliases used elsewhere in the kit */
+  --fd-teal:         var(--fd-header); /* WiFi protocol color = teal */
+  --fd-gps:          var(--fd-header); /* GPS chrome inherits header */
+
+  /* ── NIGHT PALETTE — red-only chrome, amber retained for caution ────── */
+  --fd-night-bg:           #0a0000;
+  --fd-night-card:         #3a0a0a;
+  --fd-night-card-border:  #5a1414;
+  --fd-night-header:       #ff5a5a;
+  --fd-night-text:         #ffd0d0;
+  --fd-night-dim:          #b45a5a; /* lifted red-dim — readable on card */
+  --fd-night-accent:       #ff5a5a;
+  --fd-night-caution:      #ffb547;
+  --fd-night-teal:         #ff5a5a;
+  --fd-night-purple:       #ff9696; /* rose — keeps BLE distinguishable */
+  --fd-night-gps:          #ff5a5a;
+
+  /* ── Type — pixel terminal ─────────────────────────────────────────────
+     Hardware uses M5Cardputer's bitmap font at sizes 1, 1.2, 1.5, 2, 3.
+     Base glyph cell is 6×8 px at size 1. We approximate with VT323
+     (CRT pixel) for headers & numbers, Share Tech Mono for body. */
+  --fd-font-display: "Cozette", "VT323", "Share Tech Mono", "Courier New", ui-monospace, monospace;
+  --fd-font-mono:    "Cozette", "Share Tech Mono", "JetBrains Mono", "Courier New", ui-monospace, monospace;
+  --fd-font-ui:      "Cozette", "Share Tech Mono", "Menlo", ui-monospace, monospace;
+
+  /* Type scale — anchored on the 6×8 hardware base, scaled 4× for web preview.
+     The hardware sits ~30 cm from the eye; on screen we scale up so a
+     recreated 240×135 panel reads at roughly hardware-relative sizes. */
+  --fd-fs-micro:     10px;  /* footnotes, RSSI, scrollbar labels */
+  --fd-fs-body:      13px;  /* native Cozette — primary UI */
+  --fd-fs-strong:    16px;  /* target name, hero inline values */
+  --fd-fs-h2:        20px;  /* menu items, overlay titles */
+  --fd-fs-h1:        26px;  /* Cozette hi-dpi native — big numerals */
+
+  --fd-tracking-tight: 0.02em;
+  --fd-tracking-wide:  0.04em;  /* Cozette has wide forms already — light tracking */
+
+  /* ── Spacing — 4-step scale, pinned to firmware paddings ──────────── */
+  --fd-space-xs:  2px;  /* hairline gap, pill inner-y */
+  --fd-space-sm:  6px;  /* card inner padding, icon↔text */
+  --fd-space-md: 12px;  /* card-to-card gap, section break */
+  --fd-space-lg: 18px;  /* menu row height, header strip */
+
+  /* ── Radii (4–6 px corners are standard on cards & pills) ─────────── */
+  --fd-radius-pill:   3px;
+  --fd-radius-card:   4px;
+  --fd-radius-modal:  6px;
+
+  /* ── Motion — single ease, three durations ─────────────────────────── */
+  --fd-ease:         cubic-bezier(0.0, 0.0, 0.2, 1); /* @kind other */ /* approximates 1-(1-t)² */
+  --fd-anim-quick:   180ms; /* @kind other */
+  --fd-anim-normal:  320ms; /* @kind other */
+  --fd-anim-slow:    560ms; /* @kind other */
+}
+
+/* Night-mode toggle — apply to root element when active */
+[data-fd-mode="night"] {
+  --fd-bg:          var(--fd-night-bg);
+  --fd-card:        var(--fd-night-card);
+  --fd-card-border: var(--fd-night-card-border);
+  --fd-header:      var(--fd-night-header);
+  --fd-text:        var(--fd-night-text);
+  --fd-dim:         var(--fd-night-dim);
+  --fd-accent:      var(--fd-night-accent);
+  --fd-teal:        var(--fd-night-teal);
+  --fd-purple:      var(--fd-night-purple);
+  --fd-caution:     var(--fd-night-caution);
+  --fd-gps:         var(--fd-night-gps);
+}
+
+/* ── Semantic helpers ────────────────────────────────────────────────── */
+.fd-screen {
+  background: var(--fd-bg);
+  color: var(--fd-text);
+  font-family: var(--fd-font-ui);
+  font-size: var(--fd-fs-body);
+  line-height: 1.05;
+  letter-spacing: var(--fd-tracking-tight);
+  /* Pixel-art rendering — never anti-alias the recreated 240×135 panel */
+  image-rendering: pixelated;
+}
+
+.fd-h1     { font-family: var(--fd-font-display); font-size: var(--fd-fs-h1);
+             color: var(--fd-text); letter-spacing: var(--fd-tracking-wide);
+             font-weight: 400; }
+.fd-h2     { font-family: var(--fd-font-display); font-size: var(--fd-fs-h2);
+             color: var(--fd-text); letter-spacing: var(--fd-tracking-wide);
+             font-weight: 400; }
+.fd-header { font-family: var(--fd-font-display); font-size: var(--fd-fs-body);
+             color: var(--fd-header); letter-spacing: var(--fd-tracking-wide);
+             text-transform: uppercase; }
+.fd-label  { font-size: var(--fd-fs-body); color: var(--fd-accent);
+             text-transform: uppercase; letter-spacing: var(--fd-tracking-wide); }
+.fd-value  { font-family: var(--fd-font-display); font-size: var(--fd-fs-strong);
+             color: var(--fd-text); }
+.fd-dim    { color: var(--fd-dim); font-size: var(--fd-fs-micro); }
+.fd-caution{ color: var(--fd-caution); }
+
+.fd-card {
+  background: var(--fd-card);
+  border: 1px solid var(--fd-card-border);
+  border-radius: var(--fd-radius-card);
+}
+.fd-pill {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: var(--fd-radius-pill);
+  font-size: var(--fd-fs-micro);
+  letter-spacing: var(--fd-tracking-wide);
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--fd-accent) 18%, var(--fd-bg));
+  color: #fff;
+}
