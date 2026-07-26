@@ -788,7 +788,6 @@ static unsigned long last_channel_hop = 0;
 static volatile unsigned long channel_lock_until = 0;
 static uint8_t* scan_angle_lut       = nullptr;
 static bool     scan_angle_lut_ready = false;
-static unsigned long last_ble_scan = 0;
 // Periodic BLE stack health restart — see loop().
 static unsigned long last_ble_restart_ms = 0;
 static const unsigned long BLE_RESTART_INTERVAL_MS = 1800000UL;  // 30 minutes
@@ -889,8 +888,6 @@ static bool screen_dirty = true;   // Forces redraw; set by any state change
 bool is_muted = false;
 int current_volume = 150;
 
-long session_wifi = 0;
-long session_ble = 0;
 long session_flock_wifi = 0;
 long session_flock_ble = 0;
 long session_raven = 0;
@@ -1105,11 +1102,8 @@ void seen_mac_expire() {
 char last_cap_type[16]       = "None";
 char last_cap_mac[18]        = "--:--:--:--:--:--";
 char last_cap_name[65]       = "";
-int  last_cap_rssi           = 0;
-int  last_cap_confidence     = 0;
 char last_cap_time[9]        = "00:00:00";
 char last_cap_det_method[64] = "";
-int  last_cap_seq_num        = -1;
 
 #define CAPTURE_HISTORY_SIZE 3
 struct CaptureEntry {
@@ -1233,7 +1227,6 @@ static bool toast_active = false;
 unsigned long last_time_save = 0;
 unsigned long last_sd_flush_check = 0;
 unsigned long last_persist_save = 0;
-unsigned long last_blip_time = 0;
 
 // ── Live activity feed (scanner screen) ──
 #define FEED_SIZE 8
@@ -1261,7 +1254,6 @@ static bool feed_pending_valid = false;
 // Scanner reactive-animation triggers — fired from log_detection() is_new
 // path, consumed and decayed inside draw_scanner_screen().
 static unsigned long scanner_flash_ms = 0;
-static uint16_t      scanner_flash_color = 0;
 static uint8_t       scanner_flash_proto = 0;  // 0=WiFi 1=BLE — protocol for flock pip routing
 
 // Cycleable visualization in the scanner's bottom-left panel. 'v' key
@@ -1329,7 +1321,6 @@ static volatile bool signal_active = false;
 char signal_target_mac[18]  = "";
 char signal_target_name[65] = "";
 char signal_target_type[16] = "";   // "WiFi", "BLE", or ""
-int  signal_target_id       = 0;    // sequential detection ID; 0 = unknown
 unsigned long signal_newest_sample_ms = 0;
 int signal_peak_rssi = -120;
 
@@ -1362,8 +1353,6 @@ static SigTraceEntry sig_trace[SIG_TRACE_SIZE];
 static int           sig_trace_head        = 0;  // next slot to write
 static int           sig_trace_count       = 0;
 static unsigned long sig_trace_last_sample = 0;
-static int           last_rendered_trace_head  = -1;
-static int           last_rendered_trace_count = 0;
 static unsigned long sig_trace_last_frame_ms = 0;
 static float         signal_bar_smooth = 0.0f;
 static bool          signal_bar_seeded = false;
@@ -3317,7 +3306,6 @@ static void export_restore_promiscuous() {
         esp_task_wdt_add(ScannerTaskHandle);
     }
     scanner_ready = true;
-    last_ble_scan = millis();
 }
 
 // Finish the connect sequence once WiFi.status() == WL_CONNECTED.
@@ -4618,7 +4606,6 @@ static void feed_force_push(const char* mac, const char* name, int rssi,
 
 void add_blip(uint16_t blip_color, int rssi) {
     (void)blip_color; (void)rssi;
-    last_blip_time = millis();
 }
 
 // ============================================================================
@@ -4870,10 +4857,10 @@ void log_detection(const char* type, const char* proto, int rssi, const char* ma
     if (is_new) {
         add_seen_mac(mac);
         if (strcmp(proto, "WIFI") == 0) {
-            session_wifi++; lifetime_wifi++; session_flock_wifi++;
+            lifetime_wifi++; session_flock_wifi++;
             blip_col = ACCENT_COLOR;   // condensed: all detections use accent
         } else {
-            session_ble++; lifetime_ble++; blip_col = ACCENT_COLOR;
+            lifetime_ble++; blip_col = ACCENT_COLOR;
         }
         if (strstr(type, "RAVEN") != NULL) { session_raven++; blip_col = ACCENT_COLOR; }
         else if (strcmp(proto, "BLE") == 0) { session_flock_ble++; }
@@ -4976,9 +4963,6 @@ void log_detection(const char* type, const char* proto, int rssi, const char* ma
     safe_copy(last_cap_name,       name,             sizeof(last_cap_name));
     safe_copy(last_cap_time,       current_time,     sizeof(last_cap_time));
     safe_copy(last_cap_det_method, detection_method, sizeof(last_cap_det_method));
-    last_cap_rssi       = rssi;
-    last_cap_confidence = confidence;
-    last_cap_seq_num    = seq_num;
     xSemaphoreGiveRecursive(dataMutex);
 
     if (is_new) {
@@ -4993,7 +4977,6 @@ void log_detection(const char* type, const char* proto, int rssi, const char* ma
         // packet counts, so no separate per-detection trigger is
         // needed for that.
         scanner_flash_ms    = millis();
-        scanner_flash_color = CAUTION_COLOR;  // all detections flash amber
         scanner_flash_proto = (strcmp(proto, "WIFI") == 0) ? 0 : 1;
     }
 
@@ -5088,8 +5071,6 @@ void signal_start(const char* mac, const char* name, const char* type = "", int 
 
     sig_trace_head = 0; sig_trace_count = 0; sig_trace_last_sample = 0;
     sig_trace_last_frame_ms = 0;
-    last_rendered_trace_head  = -1;
-    last_rendered_trace_count = 0;
     signal_bar_smooth = 0.0f;
     signal_bar_seeded = false;
 
@@ -5106,7 +5087,6 @@ void signal_start(const char* mac, const char* name, const char* type = "", int 
     signal_target_name[sizeof(signal_target_name) - 1] = '\0';
     strncpy(signal_target_type, type, sizeof(signal_target_type) - 1);
     signal_target_type[sizeof(signal_target_type) - 1] = '\0';
-    signal_target_id = id;
 
     signal_active = true;
 
@@ -5122,7 +5102,6 @@ void signal_stop() {
     signal_target_mac[0]  = '\0';
     signal_target_name[0] = '\0';
     signal_target_type[0] = '\0';
-    signal_target_id      = 0;
 
     signal_peak_rssi = -120;
     signal_peak_seq  = -1;
@@ -5134,8 +5113,6 @@ void signal_stop() {
 
     sig_trace_head = 0; sig_trace_count = 0; sig_trace_last_sample = 0;
     sig_trace_last_frame_ms = 0;
-    last_rendered_trace_head  = -1;
-    last_rendered_trace_count = 0;
     signal_bar_smooth = 0.0f;
     signal_bar_seeded = false;
 
@@ -7283,7 +7260,6 @@ void handle_menu_select() {
             }
             flush_pending_deletes();
             xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-            session_wifi = 0; session_ble = 0;
             session_flock_wifi = 0; session_flock_ble = 0;
             session_raven = 0;
             lifetime_wifi = 0; lifetime_ble = 0;
@@ -11132,7 +11108,7 @@ void setup() {
     boot_animate(95, "starting Bluetooth");
 
     // Tasks
-    last_channel_hop = millis(); last_ble_scan = millis(); last_sd_flush = millis(); last_persist_save = millis();
+    last_channel_hop = millis(); last_sd_flush = millis(); last_persist_save = millis();
     xTaskCreatePinnedToCore(ScannerLoopTask, "ScannerTask", 2048, NULL, 1, &ScannerTaskHandle, 0);
     if (plume_is_adv)   // no GPS UART on the regular Cardputer -> don't spawn the reader
         xTaskCreatePinnedToCore(GPSLoopTask, "GPSTask", 2048, NULL, 1, &GPSTaskHandle, 0);
@@ -11769,7 +11745,6 @@ static void service_ble_restart() {
         pBLEScan->setActiveScan(false);
         apply_ble_scan_params();
         pBLEScan->setMaxResults(0);
-        last_ble_scan = millis();
 
         // 7. Restore WiFi promiscuous sniffing (mirrors export_restore_promiscuous).
         WiFi.mode(WIFI_STA);
@@ -12288,13 +12263,13 @@ static void handle_keyboard_input() {
                 if (sim_wifi) {
                     log_detection("SIMULATION", "WIFI", random(-80, -30), fake_mac, "Test_WiFi", 6, 0, "Beacon", "manual_test", 100, 1);
                     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-                    session_flock_wifi--; session_wifi--; lifetime_wifi--;
+                    session_flock_wifi--; lifetime_wifi--;
                     lifetime_flock_total--;
                     xSemaphoreGiveRecursive(dataMutex);
                 } else {
                     log_detection("SIMULATION", "BLE", random(-90, -40), fake_mac, "Test_BLE", 0, 0, "Adv", "manual_test", 100, 1);
                     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-                    session_flock_ble--; session_ble--; lifetime_ble--;
+                    session_flock_ble--; lifetime_ble--;
                     lifetime_flock_total--;
                     xSemaphoreGiveRecursive(dataMutex);
                 }
