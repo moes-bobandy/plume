@@ -11268,6 +11268,22 @@ void setup() {
             unsigned long dissolve_start = millis();
             unsigned long dissolve_ms = 1000;
 
+            // The fade rewrites every pixel of the sprite on all ~62 frames.
+            // readPixel/drawPixel would be ~1.7 million calls each across the
+            // dissolve, with bounds checks and format dispatch per pixel; the
+            // sprite is one flat DISP_W-stride array, so walk it directly. Same
+            // accessors draw_scanner_viz_scan() uses, which carry the RGB565
+            // byte-order fixup.
+            //
+            // Detect byte order explicitly rather than inheriting it. Today it
+            // happens as a side effect of draw_scanner_viz_scan() running inside
+            // draw_current_screen() — true only because scanner_viz_mode
+            // defaults to 0, which is not a fact this loop should depend on. The
+            // call self-guards on g_buf_byte_order_detected, so it is free.
+            detect_buffer_byte_order(spr);
+            uint16_t* dissolve_buf   = (uint16_t*)spr.getBuffer();
+            const int dissolve_px    = DISP_W * SPR_H;
+
             while (millis() - dissolve_start < dissolve_ms) {
                 M5Cardputer.update();
                 process_wifi_event_queue();
@@ -11276,10 +11292,20 @@ void setup() {
 
                 draw_current_screen();
 
-                for (int y = 0; y < SPR_H; y++) {
-                    for (int x = 0; x < DISP_W; x++) {
-                        uint16_t px = spr.readPixel(x, y);
-                        spr.drawPixel(x, y, lerp_col16(px, BG_COLOR, alpha));
+                if (dissolve_buf) {
+                    for (int i = 0; i < dissolve_px; i++) {
+                        uint16_t px = read_pixel_logical(dissolve_buf, i);
+                        write_pixel_logical(dissolve_buf, i,
+                                            lerp_col16(px, BG_COLOR, alpha));
+                    }
+                } else {
+                    // getBuffer() can return null. Fade through the slow path
+                    // rather than skipping it, so the boot still looks right.
+                    for (int y = 0; y < SPR_H; y++) {
+                        for (int x = 0; x < DISP_W; x++) {
+                            uint16_t px = spr.readPixel(x, y);
+                            spr.drawPixel(x, y, lerp_col16(px, BG_COLOR, alpha));
+                        }
                     }
                 }
 
