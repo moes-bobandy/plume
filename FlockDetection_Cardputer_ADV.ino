@@ -1,5 +1,5 @@
 ﻿// ============================================================================
-// PLUME v1.2
+// PLUME v1.3
 // ============================================================================
 
 #include <M5Cardputer.h>
@@ -265,7 +265,7 @@ struct MRow { int type; int idx; const char* text; };
 static const MRow MENU_ROWS[] = {
     {0, -1, "SCREENS"},
     {1,  0, "Scanner"},
-    {1,  1, "Target"},
+    {1,  1, "Signal"},
     {1,  2, "Detections"},
     {1,  3, "GPS"},
     {1,  4, "Stats"},
@@ -338,7 +338,7 @@ struct MenuSection {
 
 static const MenuItem nav_items[] = {
     {"Scanner",          false, false, 0},
-    {"Target",           false, false, 1},
+    {"Signal",           false, false, 1},
     {"Detections",       false, false, 2},
     {"GPS Status",       false, false, 3},
     {"Device Stats",     false, false, 4},
@@ -384,7 +384,7 @@ static const int BRIGHTNESS_LEVELS[4] = {32, 64, 128, 255};
 // charger (M5Unified maps it to pmic_adc — setChargeCurrent() is a no-op), so
 // the only way to stay charge-positive on USB is to cut load. The backlight is
 // the single largest continuous draw, so low-power mode forces it down to the
-// dim ambient level. stealth (5) is handled separately and is dimmer still.
+// dim ambient level.
 static inline uint8_t effective_brightness() {
     return low_power_mode ? AMBIENT_BRIGHTNESS : BRIGHTNESS_LEVELS[brightness_level];
 }
@@ -773,8 +773,8 @@ static inline unsigned long current_dedup_window_ms() {
 // shows a version derives from these (stats card, boot screen, export page
 // badge and footer), so no other source line needs touching.
 // Also update: CHANGELOG.md, README.md footer, and the file header above.
-#define VERSION_STRING "PLUME v1.2"
-#define VERSION_SHORT  "v1.2"
+#define VERSION_STRING "PLUME v1.3"
+#define VERSION_SHORT  "v1.3"
 
 // Set to 1 to enable the 'x' key simulation trigger (development only).
 // MUST be 0 for release builds — simulation creates permanent fake
@@ -946,7 +946,6 @@ static void export_derive_password() {
 int current_screen = 0;
 bool system_fully_booted = false;
 static bool screen_dirty = true;   // Forces redraw; set by any state change
-bool stealth_mode = false;
 bool is_muted = false;
 int current_volume = 150;
 
@@ -1454,7 +1453,6 @@ static SigTraceEntry sig_trace[SIG_TRACE_SIZE];
 static int           sig_trace_head        = 0;  // next slot to write
 static int           sig_trace_count       = 0;
 static unsigned long sig_trace_last_sample = 0;
-static float         sig_trace_smooth[SIG_TRACE_SIZE];
 static int           last_rendered_trace_head  = -1;
 static int           last_rendered_trace_count = 0;
 static unsigned long sig_trace_last_frame_ms = 0;
@@ -1659,7 +1657,7 @@ int ble_pcap_write_count = 0;
 // AUDIO & LED
 // ============================================================================
 void beep(int frequency, int duration_ms) {
-    if (!stealth_mode && !is_muted) { 
+    if (!is_muted) { 
         M5Cardputer.Speaker.tone(frequency, duration_ms); 
     }
 }
@@ -1693,7 +1691,7 @@ void LedTask(void* pv) {
             // — see the same note in run_charge_mode(). Below 4/4 the LED is
             // dark whatever we write to it, so gating here keeps software state
             // honest instead of driving a pin that can't respond.
-            bool show_led = !stealth_mode && !night_mode &&
+            bool show_led = !night_mode &&
                             (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
             if (show_led) {
                 float breath = anim_pulse(export_on ? UI_PULSE_MEDIUM : UI_PULSE_BREATHE);
@@ -2977,12 +2975,12 @@ static const char EXPORT_PAGE_TEMPLATE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Plume Export</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap');
 :root{--bg:#050A14;--card:#1D3258;--cb:#2E4670;--h:#4DDBC2;--t:#E8EFFF;
 --d:#95A5B8;--p:#8B7CDB;--ca:#FFB547;--hd:rgba(77,219,194,.15);
---gl:rgba(46,70,112,.5)}
+--gl:rgba(46,70,112,.5);
+--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--t);
+body{font-family:var(--mono);background:var(--bg);color:var(--t);
 min-height:100vh;overflow-x:hidden}
 body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(
 135deg,transparent,transparent 7px,var(--gl) 7px,var(--gl) 8px);opacity:.25;
@@ -2990,10 +2988,10 @@ pointer-events:none;z-index:0}
 .pg{position:relative;z-index:1;max-width:520px;margin:0 auto;padding:24px 20px 40px}
 .hs{display:flex;align-items:center;justify-content:space-between;padding-bottom:12px;
 border-bottom:1px solid var(--cb);margin-bottom:20px}
-.ht{font-family:'Share Tech Mono',monospace;font-size:14px;color:var(--h);
+.ht{font-family:var(--mono);font-size:14px;color:var(--h);
 letter-spacing:3px;text-transform:uppercase}
 .pl{display:inline-flex;align-items:center;gap:4px;border:1px solid;border-radius:6px;
-padding:2px 10px;font-family:'JetBrains Mono',monospace;font-size:11px;
+padding:2px 10px;font-family:var(--mono);font-size:11px;
 letter-spacing:1px;line-height:1.4;white-space:nowrap;text-decoration:none;
 transition:all .2s ease}
 .po{border-color:rgba(149,165,184,.4);color:var(--t);background:rgba(149,165,184,.12)}
@@ -3010,7 +3008,7 @@ animation:dp 1.5s ease-in-out infinite}
 @keyframes bg{0%%,100%%{box-shadow:0 0 8px rgba(77,219,194,.1)}
 50%%{box-shadow:0 0 16px rgba(77,219,194,.2)}}
 @keyframes dp{0%%,100%%{opacity:.5}50%%{opacity:1}}
-.sl{font-family:'Share Tech Mono',monospace;font-size:11px;color:var(--h);
+.sl{font-family:var(--mono);font-size:11px;color:var(--h);
 letter-spacing:3px;text-transform:uppercase;margin-bottom:10px;padding-bottom:6px;
 border-bottom:1px solid var(--cb)}
 .cd{border:1px solid var(--cb);border-radius:6px;padding:14px 16px;margin-bottom:14px;
@@ -3018,7 +3016,7 @@ background:transparent;transition:border-color .25s ease}
 .cd:hover{border-color:rgba(77,219,194,.35)}
 .kv{display:flex;justify-content:space-between;align-items:center;padding:4px 0}
 .kl{font-size:11px;color:var(--h);letter-spacing:2px;text-transform:uppercase}
-.kv2{font-size:13px;color:var(--t);font-weight:500;font-family:'Share Tech Mono',monospace;
+.kv2{font-size:13px;color:var(--t);font-weight:500;font-family:var(--mono);
 letter-spacing:1px}
 .fr{display:flex;align-items:center;justify-content:space-between;padding:10px 0;
 border-bottom:1px solid rgba(46,70,112,.3);transition:background .15s}
@@ -4000,7 +3998,7 @@ static void save_session_to_flash() {
 
     long l_wifi, l_ble, l_sec, l_flock, l_boots, l_writes, l_next_id;
     int l_vol, l_brightness;
-    bool l_night, l_low_power, l_stealth, l_muted, l_turbo, l_c5;
+    bool l_night, l_low_power, l_muted, l_turbo, l_c5;
     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
     l_wifi = lifetime_wifi; l_ble = lifetime_ble; l_sec = lifetime_seconds;
     l_flock = lifetime_flock_total; l_vol = current_volume; l_boots = lifetime_boots;
@@ -4009,25 +4007,35 @@ static void save_session_to_flash() {
     l_night      = night_mode;
     l_brightness = brightness_level;
     l_low_power  = low_power_mode;
-    l_stealth    = stealth_mode;
     l_muted      = is_muted;
     l_turbo      = turbo_mode_active;
     l_c5         = c5_enabled;
     xSemaphoreGiveRecursive(dataMutex);
 
-    // Minimum acceptable byte count for a complete write. Computed from
-    // the 15 lines below assuming empty ssid/pass strings: each line
-    // contributes at least its key + '=' + minimum value + '\n'. A real
-    // write with non-empty fields runs ~180-220 bytes. Anything below
-    // this floor means the write truncated mid-stream.
+    // Minimum acceptable byte count for a complete write. Computed from all
+    // 16 lines below assuming empty ssid/pass strings: each contributes at
+    // least its key + '=' + minimum value + '\n'. A real write with non-empty
+    // fields runs ~180-220 bytes. Anything below this floor means the write
+    // truncated mid-stream.
     //
     //   wifi=0\n       (7)   ble=0\n        (6)   seconds=0\n    (10)
     //   flock=0\n      (8)   volume=0\n     (9)   boots=0\n      (8)
     //   writes=0\n     (9)   ssid=\n        (6)   pass=\n        (6)
     //   next_id=0\n    (10)  night=0\n      (8)   brightness=0\n (13)
-    //   low_power=0\n  (12)  stealth=0\n    (10)  muted=0\n      (8)
-    //   Sum: 130 bytes (empty-field floor)
-    static const size_t PERSIST_MIN_BYTES = 130;
+    //   low_power=0\n  (12)  muted=0\n      (8)   turbo=0\n      (8)
+    //   c5=0\n         (5)
+    //   Sum: 133 bytes (empty-field floor)
+    //
+    // The constant sits 13 bytes under that floor as slack. Note the tradeoff:
+    // no legitimate write can come in below 133, so 133 would be the tightest
+    // correct value — 120 will still pass a write that truncated after losing
+    // turbo (8) and c5 (5). Raise it to 133 to close that gap.
+    //
+    // Keep this list in sync with the printf block below. It had drifted twice
+    // already: turbo and c5 were added without updating either the list or the
+    // constant, which is how a floor of 130 came to sit 13 bytes under a true
+    // minimum of 143 while reading as if it were exact.
+    static const size_t PERSIST_MIN_BYTES = 120;
 
     bool write_ok = false;
     for (int attempt = 0; attempt < 3 && !write_ok; attempt++) {
@@ -4051,7 +4059,6 @@ static void save_session_to_flash() {
             wp(f.printf("night=%d\n",       l_night ? 1 : 0));
             wp(f.printf("brightness=%d\n",  l_brightness));
             wp(f.printf("low_power=%d\n",   l_low_power ? 1 : 0));
-            wp(f.printf("stealth=%d\n",     l_stealth ? 1 : 0));
             wp(f.printf("muted=%d\n",       l_muted ? 1 : 0));
             wp(f.printf("turbo=%d\n",       l_turbo ? 1 : 0));
             wp(f.printf("c5=%d\n",          l_c5 ? 1 : 0));
@@ -4322,7 +4329,6 @@ void load_session_from_flash() {
         else if (key == "night")      night_mode = (val.toInt() != 0);
         else if (key == "brightness") { int b = val.toInt(); if (b >= 0 && b <= 3) brightness_level = b; }
         else if (key == "low_power")  low_power_mode = (val.toInt() != 0);
-        else if (key == "stealth")    stealth_mode = (val.toInt() != 0);
         else if (key == "muted")      is_muted = (val.toInt() != 0);
         else if (key == "turbo")      turbo_mode_active = (val.toInt() != 0);
         else if (key == "c5")         c5_enabled = (val.toInt() != 0);
@@ -4619,7 +4625,6 @@ static ScanDevice    scan_devs[SCAN_MAX_DEVICES] = {};
 static unsigned long scan_last_refresh_ms = 0;
 static unsigned long scan_last_frame_ms   = 0;
 static float         scan_sweep_angle     = 0.0f;
-static float*        signal_curve_cache   = nullptr; // allocated on enter screen 1, freed on leave
 
 // Byte order detection for direct sprite buffer access.
 // Set once on first call to draw_scanner_viz_scan.
@@ -5202,7 +5207,6 @@ void signal_start(const char* mac, const char* name, const char* type = "", int 
     signal_active = false;
 
     sig_trace_head = 0; sig_trace_count = 0; sig_trace_last_sample = 0;
-    memset(sig_trace_smooth, 0, sizeof(sig_trace_smooth));
     sig_trace_last_frame_ms = 0;
     last_rendered_trace_head  = -1;
     last_rendered_trace_count = 0;
@@ -5249,7 +5253,6 @@ void signal_stop() {
     signal_newest_sample_ms = 0;
 
     sig_trace_head = 0; sig_trace_count = 0; sig_trace_last_sample = 0;
-    memset(sig_trace_smooth, 0, sizeof(sig_trace_smooth));
     sig_trace_last_frame_ms = 0;
     last_rendered_trace_head  = -1;
     last_rendered_trace_count = 0;
@@ -6018,7 +6021,7 @@ void AlarmTask(void* pvParameters) {
 }
 
 void play_escalated_alarm(int confidence, int source) {
-    if (stealth_mode || is_muted || is_alarming) return;
+    if (is_muted || is_alarming) return;
     is_alarming = true;
     intptr_t param = ((intptr_t)confidence & 0xFFFF) | ((intptr_t)(source & 0x1) << 16);
     if (xTaskCreate(AlarmTask, "AlarmTask", 2048, (void*)param, 2, NULL) != pdPASS) {
@@ -6295,7 +6298,7 @@ static void drawPill_lcd(int x, int y, const char* text, uint16_t accent_col,
 void draw_header_lcd(int screen_num, const char* name_override) {
     auto& lcd = M5Cardputer.Display;
     static const char* screen_names[NUM_SCREENS] = {
-        "SCANNER", "TARGET", "DETECTIONS", "GPS", "STATS"
+        "SCANNER", "SIGNAL", "DETECTIONS", "GPS", "STATS"
     };
     if (screen_num < 0 || screen_num >= NUM_SCREENS) screen_num = 0;
 
@@ -6324,10 +6327,10 @@ void draw_header_lcd(int screen_num, const char* name_override) {
 
     // Mode badges
     {
-        // A (ambient), N (night) and S (stealth) were dropped: each announces a
-        // state that is already unmistakable on screen — ambient and stealth
-        // visibly dim the backlight, night swaps the entire palette — so the
-        // badge was spending scarce header width to say what the display had
+        // A (ambient) and N (night) were dropped: each announces a state that
+        // is already unmistakable on screen — ambient visibly dims the
+        // backlight, night swaps the entire palette — so the badge was
+        // spending scarce header width to say what the display had
         // already said. What remains is state you cannot otherwise see.
         // Nothing here uses DIM_COLOR any more; at TS_MICRO it was too faint.
         struct ModeBadge { bool active; const char* letter; uint16_t color; };
@@ -6437,7 +6440,6 @@ static void render_frame() {
     static bool     last_muted          = false;
     static bool     last_ambient        = false;
     static bool     last_night          = false;
-    static bool     last_stealth        = false;
     static bool     last_signal_active  = false;
     static bool     last_low_power      = false;
     static bool     last_turbo          = false;
@@ -6472,7 +6474,6 @@ static void render_frame() {
         || (is_muted           != last_muted)
         || (ambient_mode       != last_ambient)
         || (night_mode         != last_night)
-        || (stealth_mode       != last_stealth)
         || (signal_active      != last_signal_active)
         || (low_power_mode     != last_low_power)
         || (turbo_mode_active  != last_turbo)
@@ -6495,7 +6496,6 @@ static void render_frame() {
         last_muted     = is_muted;
         last_ambient   = ambient_mode;
         last_night     = night_mode;
-        last_stealth   = stealth_mode;
         last_signal_active = signal_active;
         last_low_power = low_power_mode;
         last_turbo     = turbo_mode_active;
@@ -6731,7 +6731,7 @@ void draw_help_overlay() {
 
 // Soft UI click — brief tone that reads as a tactile tick.
 static void menu_click() {
-    if (stealth_mode || is_muted) return;
+    if (is_muted) return;
     M5Cardputer.Speaker.tone(660, 5);  // soft mechanical-keyboard tick
 }
 
@@ -7268,8 +7268,8 @@ static void set_turbo_mode(bool on) {
             apply_ble_scan_params();
             gps_standby(false);   // turbo cancels low power: wake the GPS too
             // Low-power dimmed the backlight; turbo means full performance, so
-            // bring it back up (unless stealth/ambient own it).
-            if (!stealth_mode && !ambient_mode)
+            // bring it back up (unless ambient owns it).
+            if (!ambient_mode)
                 M5Cardputer.Display.setBrightness(effective_brightness());
         }
         setCpuFrequencyMhz(240);
@@ -7333,8 +7333,8 @@ void handle_menu_select() {
                 set_toast_direct("LOW POWER OFF", TOAST_NEUTRAL);
             }
             // Apply the backlight change now (dim on, restore on off). Skip when
-            // stealth/ambient own the backlight so we don't fight them.
-            if (!stealth_mode && !ambient_mode)
+            // ambient owns the backlight so we don't fight it.
+            if (!ambient_mode)
                 M5Cardputer.Display.setBrightness(effective_brightness());
             apply_ble_scan_params();
             gps_standby(low_power_mode);   // GPS receiver to standby / wake
@@ -9581,317 +9581,253 @@ void draw_signal_screen() {
     trace_total = sig_trace_total;
     give_data_mutex();
 
-    // ── Per-frame dt — computed once, shared by all smoothers ──
+    // ── Per-frame dt for the meter ease ──
     float frame_dt = (sig_trace_last_frame_ms == 0) ? 16.0f
                    : (float)(frame_ms - sig_trace_last_frame_ms);
     if (frame_dt > 100.0f) frame_dt = 100.0f;
     sig_trace_last_frame_ms = frame_ms;
 
-    // ── Smooth trace values for fluid curve motion ──
-    for (int i = 0; i < trace_count; i++) {
-        int slot = (trace_head - trace_count + i + SIG_TRACE_SIZE) % SIG_TRACE_SIZE;
-        float raw = (float)((int)trace_snap[slot].rssi - RSSI_VIS_FLOOR) / (float)RSSI_VIS_RANGE;
-        if (raw < 0.0f) raw = 0.0f;
-        if (raw > 1.0f) raw = 1.0f;
-        sig_trace_smooth[i] = anim_filter(sig_trace_smooth[i], raw, 300.0f, frame_dt);
-    }
-
-    // ── Trend: slope over tracker sample window ──
-    int trend = 0;
-    if (has_rssi && tracker_sample_count >= 3) {
-        int diff = tracker_samples[tracker_sample_count - 1] - tracker_samples[0];
-        if (diff > 3)       trend =  1;
-        else if (diff < -3) trend = -1;
-    }
-
     spr.fillSprite(BG_COLOR);
 
-    const int TL = TEXT_LEFT;
+    // ── Geometry, spec screen-space converted to sprite-space ──
+    const int SX          = 6;                    // left margin — fuller bleed than TEXT_LEFT
+    const int RX          = DISP_W - 6;           // right edge for right-anchored runs
+    const int PLOT_W      = RX - SX;              // 228
+    const int PLOT_TOP    = 106 - CONTENT_Y;      // 86
+    const int PLOT_BOTTOM = 130 - CONTENT_Y;      // 110
+    const int PLOT_H      = PLOT_BOTTOM - PLOT_TOP;
 
-    // ── Row 1: device name (left) + status badge (right) ──
-    // No "TARGET" label here: the screen header already says TARGET, so a second
-    // one was pure duplication. The content now starts with the device itself,
-    // sharing this row with the status badge — which means the name has to stop
-    // short of the badge rather than run underneath it.
-    int name_y;
-    {
-        bool is_flock = (strncmp(target_type, "FLOCK", 5) == 0
-                      || strncmp(target_type, "RAVEN", 5) == 0);
-        const char* badge_text;
-        uint16_t    badge_col;
-        if (!active) { badge_text = "No Target"; badge_col = DIM_COLOR; }
-        else         { badge_text = is_flock ? "Hunting" : "Tracking";
-                       badge_col = is_flock ? HEADER_COLOR : CAUTION_COLOR; }
-        int bw = (int)strlen(badge_text) * (ts_char_w(TS_MICRO) + 1) + 13;
-        int bh = 17;
-        int bx = DISP_W - TL - bw;
-        int by = UI_PAD_XS;
-
-        name_y = by + 4;   // optical centre of TS_BODY against the 17px badge
-        spr.setTextSize(TS_BODY);
-        spr.setCursor(TL, name_y);
-        if (!active) {
-            spr.setTextColor(TEXT_COLOR, BG_COLOR);
-            spr.print("No Target");
-        } else {
-            bool nok = target_name[0] != '\0'
-                       && strcmp(target_name, "Hidden")  != 0
-                       && strcmp(target_name, "Unknown") != 0;
-            const char* raw_name = nok ? target_name
-                                 : ((strlen(target_mac) > 8) ? target_mac + 9 : target_mac);
-            char id_buf[10] = "";
-            if (target_id > 0)
-                snprintf(id_buf, sizeof(id_buf), " (#%03d)", target_id);
-            int id_w      = (int)strlen(id_buf) * ts_char_w(TS_BODY);
-            // Bound by the badge's left edge, not the screen width.
-            int avail_w   = bx - TL - UI_PAD_SM - id_w;
-            int max_chars = (avail_w > 0) ? avail_w / ts_char_w(TS_BODY) : 0;
-            if (max_chars > 64) max_chars = 64;   // disp[] is 65 incl. NUL
-            char disp[65];
-            strncpy(disp, raw_name, max_chars);
-            disp[max_chars] = '\0';
-            spr.setTextColor(TEXT_COLOR, BG_COLOR);
-            spr.print(disp);
-            if (id_buf[0]) {
-                spr.setTextColor(DIM_COLOR, BG_COLOR);
-                spr.print(id_buf);
-            }
+    // Size-aware letter-spaced text. kprint() hardcodes a 6px advance, which is
+    // only correct at size 1; this screen mixes five sizes.
+    auto text_w = [](const char* t, float sz, int extra) -> int {
+        int n = (int)strlen(t);
+        return n > 0 ? n * (ts_char_w(sz) + extra) - extra : 0;
+    };
+    auto text_at = [&](int x, int y, const char* t, float sz, int extra) {
+        spr.setTextSize(sz);
+        int adv = ts_char_w(sz) + extra;
+        for (const char* p = t; *p; p++) {
+            char ch[2] = {*p, '\0'};
+            spr.setCursor(x, y);
+            spr.print(ch);
+            x += adv;
         }
+    };
 
-        // Badge painted last so it always sits above any name overflow.
-        uint16_t sfill = lerp_col16(BG_COLOR, badge_col, 0.22f);
-        spr.fillRoundRect(bx, by, bw, bh, 5, sfill);
-        spr.drawRoundRect(bx, by, bw, bh, 5, badge_col);
-        spr.setTextColor(badge_col, sfill);
-        spr.setTextSize(TS_MICRO);
-        spr.setCursor(bx + 6, by + 4);
-        kprint(spr, badge_text);
-    }
-
-    // ── No-target early exit ──
+    // ── No-target state ──
     if (!active) {
-        const char* hint = "open feed [f] and press [t] to target";
-        int hint_w = (int)strlen(hint) * (ts_char_w(TS_MICRO) + 1);
-        int hint_x = (DISP_W - hint_w) / 2;
-        int hint_y = name_y + 10 + (SPR_H - name_y - 10) / 2;
-        spr.setTextSize(TS_MICRO);
+        const char* head = "NEED TARGET";
+        const char* hint = "press F for feed, pick a device, then T";
         spr.setTextColor(DIM_COLOR, BG_COLOR);
-        spr.setCursor(hint_x, hint_y);
-        kprint(spr, hint);
+        text_at((DISP_W - text_w(head, 2.0f, 1)) / 2, 52 - CONTENT_Y, head, 2.0f, 1);
+        // Plain advance, not letter-spaced: at 38 characters the hint only just
+        // fits the panel as it is.
+        text_at((DISP_W - text_w(hint, TS_MICRO, 0)) / 2, 74 - CONTENT_Y, hint, TS_MICRO, 0);
+        spr.drawFastHLine(SX, PLOT_BOTTOM, PLOT_W, CARD_BORDER);
         return;
     }
 
-    // ── Row 3: LIVE SIGNAL label ──
-    int live_y = name_y + 10 + UI_PAD_MD;
-    spr.setTextColor(HEADER_COLOR, BG_COLOR);
-    spr.setTextSize(TS_MICRO);
-    spr.setCursor(TL, live_y);
-    kprint(spr, "LIVE SIGNAL", 2);   // match the label letter-spacing above
+    // ── Freshness ──
+    // LOST is the shorter gate: the live elements go quiet fast, the labelling
+    // waits longer before it starts shouting.
+    bool ever_heard = (newest_ms != 0);
+    int  age_s      = ever_heard ? (int)((frame_ms - newest_ms) / 1000UL) : 0;
+    bool is_lost    = !ever_heard || age_s >= SIG_LOST_AFTER_S;
+    bool is_stale   = !ever_heard || age_s >= SIG_STALE_AFTER_S;
 
-    // ── Row 4: dBm hero + trend indicator ──
-    int hero_y = live_y + 10 + UI_PAD_XS;
+    bool is_ble   = (strstr(target_type, "BLE") != nullptr);
+    bool is_flock = (strncmp(target_type, "FLOCK", 5) == 0
+                  || strncmp(target_type, "RAVEN", 5) == 0);
+
+    uint16_t accent = is_stale ? CAUTION_COLOR : HEADER_COLOR;
+
+    // ── Status pill (right-anchored, drawn first so the name can be bounded) ──
+    const char* pill_text = is_stale ? "STALE" : (is_flock ? "HUNTING" : "TRACKING");
+    uint16_t    pill_col  = (is_stale || is_flock) ? CAUTION_COLOR : HEADER_COLOR;
+    int pill_w = text_w(pill_text, TS_MICRO, 1) + 10;
+    int pill_x = RX - pill_w;
+    int pill_y = 29 - CONTENT_Y;
+    spr.fillRoundRect(pill_x, pill_y, pill_w, 11, 3, pill_col);
+    spr.setTextColor(BG_COLOR, pill_col);
+    text_at(pill_x + 5, pill_y + 2, pill_text, TS_MICRO, 1);
+
+    // ── Protocol glyph — identity, so it never takes the stale colour ──
+    const int gx = SX, gy = 28 - CONTENT_Y;
     {
-        spr.setTextSize(TS_STRONG);
-        if (has_rssi) {
-            char num_buf[6];
-            snprintf(num_buf, sizeof(num_buf), "%d", target_rssi);
-            spr.setTextColor(TEXT_COLOR, BG_COLOR);
-            spr.setCursor(TL, hero_y);
-            spr.print(num_buf);
-            int num_w = (int)strlen(num_buf) * ts_char_w(TS_STRONG);
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
-            spr.setTextSize(TS_BODY);
-            spr.setCursor(TL + num_w + UI_PAD_XS, hero_y + 3);
-            spr.print("dBm");
+        uint16_t gc = is_ble ? PURPLE_COLOR : HEADER_COLOR;
+        if (is_ble) {
+            const int ox[4] = {5, 10, 5, 0}, oy[4] = {0, 5, 10, 5};
+            const int ix[4] = {5,  9, 5, 1}, iy[4] = {1, 5,  9, 5};
+            for (int i = 0; i < 4; i++) {
+                int j = (i + 1) & 3;
+                spr.drawLine(gx + ox[i], gy + oy[i], gx + ox[j], gy + oy[j], gc);
+                spr.drawLine(gx + ix[i], gy + iy[i], gx + ix[j], gy + iy[j], gc);
+            }
         } else {
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
-            spr.setCursor(TL, hero_y);
-            spr.print("--");
-            spr.setTextSize(TS_BODY);
-            spr.setCursor(TL + 2 * ts_char_w(TS_STRONG) + UI_PAD_XS, hero_y + 3);
-            spr.print("dBm");
+            const int ox[3] = {5, 10, 0}, oy[3] = {0, 9, 9};
+            const int ix[3] = {5,  8, 2}, iy[3] = {2, 8, 8};
+            for (int i = 0; i < 3; i++) {
+                int j = (i + 1) % 3;
+                spr.drawLine(gx + ox[i], gy + oy[i], gx + ox[j], gy + oy[j], gc);
+                spr.drawLine(gx + ix[i], gy + iy[i], gx + ix[j], gy + iy[j], gc);
+            }
         }
     }
 
-    if (has_rssi && trend != 0) {
-        const char* trend_text = (trend > 0) ? "CLOSER" : "FARTHER";
-        uint16_t    trend_col  = (trend > 0) ? HEADER_COLOR : CAUTION_COLOR;
-        int tri_x  = TL + 80;
-        int tri_cy = hero_y + 6;
-        if (trend > 0) {
-            spr.fillTriangle(tri_x, tri_cy + 3, tri_x + 6, tri_cy + 3, tri_x + 3, tri_cy - 3, trend_col);
-        } else {
-            spr.fillTriangle(tri_x, tri_cy - 3, tri_x + 6, tri_cy - 3, tri_x + 3, tri_cy + 3, trend_col);
-        }
-        spr.setTextColor(trend_col, BG_COLOR);
-        spr.setTextSize(TS_MICRO);
-        spr.setCursor(tri_x + 10, hero_y + 2);
-        kprint(spr, trend_text);
+    // ── Device name — truncated, no ellipsis, stops 6px short of the pill ──
+    {
+        bool nok = target_name[0] != '\0'
+                   && strcmp(target_name, "Hidden")  != 0
+                   && strcmp(target_name, "Unknown") != 0;
+        const char* raw = nok ? target_name
+                        : ((strlen(target_mac) > 8) ? target_mac + 9 : target_mac);
+        int name_x = gx + 15;
+        int avail  = (pill_x - 6) - name_x;
+        int maxc   = (avail > 0) ? avail / ts_char_w(2.0f) : 0;
+        if (maxc > 64) maxc = 64;
+        char disp[65];
+        strncpy(disp, raw, maxc);
+        disp[maxc] = '\0';
+        spr.setTextColor(TEXT_COLOR, BG_COLOR);
+        spr.setTextSize(2.0f);
+        spr.setCursor(name_x, gy - 3);   // optical centre against the 10px glyph
+        spr.print(disp);
     }
 
-    // ── Row 5: Signal bar with micro-jitter ──
-    int bar_y = hero_y + 14 + UI_PAD_SM;
+    // ── Last heard (right-anchored) — computed before the hero so the "(peak)"
+    //    tag can bow out rather than collide with it. ──
+    char seen[20];
+    if (!ever_heard)      safe_copy(seen, "NOT HEARD", sizeof(seen));
+    else if (age_s <= 99) snprintf(seen, sizeof(seen), "SEEN %ds AGO", age_s);
+    else {
+        int m = age_s / 60;
+        if (m > 99) m = 99;
+        snprintf(seen, sizeof(seen), "SEEN %dm AGO", m);
+    }
+    int seen_x = RX - text_w(seen, TS_BODY, 0);
+    spr.setTextColor(is_stale ? CAUTION_COLOR : TEXT_COLOR, BG_COLOR);
+    text_at(seen_x, 58 - CONTENT_Y, seen, TS_BODY, 0);
+
+    // ── Peak hero — the reading, so white in every state ──
     {
-        int bar_x = TL;
-        int bar_w = DISP_W - TL * 2;
-        int bar_h = 6;
-        int bar_r = 3;
+        const int hero_y = 50 - CONTENT_Y;
+        const int hero_b = hero_y + 24;          // size-3 cell height
+        char pk[8];
+        if (peak_rssi > -120) snprintf(pk, sizeof(pk), "%d", peak_rssi);
+        else                  safe_copy(pk, "--", sizeof(pk));
 
-        spr.fillRoundRect(bar_x, bar_y, bar_w, bar_h, bar_r, CARD_COLOR);
+        spr.setTextColor(TEXT_COLOR, BG_COLOR);
+        spr.setTextSize(3.0f);
+        spr.setCursor(SX, hero_y);
+        spr.print(pk);
 
-        if (has_rssi) {
-            float raw_pct = (float)(target_rssi - RSSI_VIS_FLOOR) / (float)RSSI_VIS_RANGE;
-            if (raw_pct < 0.0f) raw_pct = 0.0f;
-            if (raw_pct > 1.0f) raw_pct = 1.0f;
-            signal_bar_smooth = anim_filter_seed(signal_bar_smooth, raw_pct,
-                                                 120.0f, frame_dt, &signal_bar_seeded);
-            float jitter = sinf((float)frame_ms * 0.007f) * 0.008f
-                         + sinf((float)frame_ms * 0.013f) * 0.005f;
-            float display_pct = signal_bar_smooth + jitter;
-            if (display_pct < 0.005f) display_pct = 0.005f;
-            if (display_pct > 1.0f)   display_pct = 1.0f;
-            int fill_w = (int)(display_pct * (float)bar_w);
-            if (fill_w > 0) {
-                int fr = fill_w / 2 < bar_r ? fill_w / 2 : bar_r;
-                spr.fillRoundRect(bar_x, bar_y, fill_w, bar_h, fr, HEADER_COLOR);
+        int x = SX + (int)strlen(pk) * ts_char_w(3.0f) + 5;
+        spr.setTextSize(TS_BODY);
+        spr.setCursor(x, hero_b - 10);
+        spr.print("dBm");
+
+        x += ts_char_w(TS_BODY) * 3 + 7;
+        if (x + text_w("(peak)", TS_MICRO, 1) <= seen_x - 6)
+            text_at(x, hero_b - 8, "(peak)", TS_MICRO, 1);
+    }
+
+    // ── Peak-hold meter ──
+    {
+        const int mt_y = 83 - CONTENT_Y;
+        spr.fillRoundRect(SX, mt_y, PLOT_W, 6, 3, CARD_COLOR);
+
+        if (!is_lost && has_rssi) {
+            float lv = (float)(target_rssi - RSSI_VIS_FLOOR) / (float)RSSI_METER_RANGE;
+            if (lv < 0.0f) lv = 0.0f;
+            if (lv > 1.0f) lv = 1.0f;
+            // 140ms constant ≈ the spec's 320ms settle at ~90%.
+            signal_bar_smooth = anim_filter_seed(signal_bar_smooth, lv, 140.0f,
+                                                 frame_dt, &signal_bar_seeded);
+            int fw = (int)(signal_bar_smooth * (float)PLOT_W + 0.5f);
+            if (fw > 0) {
+                int fr = (fw / 2 < 3) ? fw / 2 : 3;
+                spr.fillRoundRect(SX, mt_y, fw, 6, fr, accent);
             }
         } else {
             signal_bar_smooth = 0.0f;
             signal_bar_seeded = false;
         }
+
+        // Peak hold: snaps on contact and never falls back while the target is
+        // held — smoothing this would misrepresent what peak detection means.
+        if (peak_rssi > -120) {
+            float pv = (float)(peak_rssi - RSSI_VIS_FLOOR) / (float)RSSI_METER_RANGE;
+            if (pv < 0.0f) pv = 0.0f;
+            if (pv > 1.0f) pv = 1.0f;
+            int hx = SX + (int)(pv * (float)PLOT_W + 0.5f);
+            if (hx > RX - 2) hx = RX - 2;
+            spr.fillRect(hx, 79 - CONTENT_Y, 2, 14, TEXT_COLOR);
+        }
     }
 
-    // ── Row 6: Trace area ──
-    int trace_top    = bar_y + 6 + UI_PAD_XS + 2;
-    int trace_bottom = SPR_H - 2;
-    int trace_left   = TL;
-    int trace_right  = DISP_W - TL;
-    int trace_w      = trace_right - trace_left;
-    int trace_h      = trace_bottom - trace_top;
+    // ── Trace ──
+    spr.drawFastHLine(SX, PLOT_BOTTOM, PLOT_W, CARD_BORDER);
 
-    spr.setClipRect(trace_left, trace_top, trace_w, trace_h);
+    if (trace_count >= 1) {
+        static int xs[SIG_TRACE_SIZE], ys[SIG_TRACE_SIZE];
+        const int n = trace_count;
 
-    if (trace_count >= 2) {
-        static float trace_vals[SIG_TRACE_SIZE];
-        int trace_max_rssi = -128, trace_max_idx = -1;
-        for (int i = 0; i < trace_count; i++) {
-            int slot = (trace_head - trace_count + i + SIG_TRACE_SIZE) % SIG_TRACE_SIZE;
-            int rv   = (int)trace_snap[slot].rssi;
-            trace_vals[i] = sig_trace_smooth[i];
-            if (rv > trace_max_rssi) { trace_max_rssi = rv; trace_max_idx = i; }
+        // The x axis scales to the samples we actually have and pins at two
+        // minutes once the ring is full, so a fresh target plots full width
+        // instead of a stub in an empty box.
+        for (int i = 0; i < n; i++) {
+            int slot = (trace_head - n + i + SIG_TRACE_SIZE * 2) % SIG_TRACE_SIZE;
+            int dbm  = (int)trace_snap[slot].rssi;
+            int y    = PLOT_BOTTOM - (int)((float)PLOT_H * (float)(dbm - RSSI_VIS_FLOOR)
+                                           / (float)RSSI_TRACE_RANGE + 0.5f);
+            if (y < PLOT_TOP)    y = PLOT_TOP;
+            if (y > PLOT_BOTTOM) y = PLOT_BOTTOM;
+            ys[i] = y;
+            xs[i] = (n == 1) ? RX : SX + (PLOT_W * i) / (n - 1);
         }
 
-        // Catmull-Rom spline evaluator
-        auto eval_cr = [&](float idx_f) -> float {
-            int ci = (int)idx_f;
-            float t  = idx_f - (float)ci;
-            int i0 = ci > 0              ? ci - 1 : 0;
-            int i1 = ci < trace_count-1  ? ci     : trace_count-1;
-            int i2 = ci+1 < trace_count  ? ci+1   : trace_count-1;
-            int i3 = ci+2 < trace_count  ? ci+2   : trace_count-1;
-            float p0=trace_vals[i0], p1=trace_vals[i1];
-            float p2=trace_vals[i2], p3=trace_vals[i3];
-            float t2=t*t, t3=t2*t;
-            float v = 0.5f*((-p0+3*p1-3*p2+p3)*t3 + (2*p0-5*p1+4*p2-p3)*t2
-                            + (-p0+p2)*t + 2*p1);
-            return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
-        };
+        // Clip top reaches above the plot band to admit the peak tick, and the
+        // sides run 3px wide of the plot so the dots sitting on the first and
+        // last vertices are not sliced in half.
+        spr.setClipRect(SX - 3, 104 - CONTENT_Y, PLOT_W + 7,
+                        PLOT_BOTTOM - (104 - CONTENT_Y) + 1);
 
-        float* curve_cache = signal_curve_cache;
-        if (!curve_cache) {
-            // Cache alloc failed — show message instead of trace
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
-            spr.setTextSize(TS_MICRO);
-            int msg_w = 12 * (ts_char_w(TS_MICRO) + 1);
-            spr.setCursor((DISP_W - msg_w) / 2, trace_top + trace_h / 2 - 4);
-            kprint(spr, "low memory", 1);
-            spr.clearClipRect();
-            return;
-        }
-        for (int px = 0; px <= trace_w && px < 241; px++) {
-            float idx_f = (float)px / (float)trace_w * (float)(trace_count - 1);
-            curve_cache[px] = eval_cr(idx_f);
-        }
-
-        // Fill under curve (6% max alpha — trace is context, not primary)
-        for (int px = 0; px <= trace_w; px++) {
-            float val = curve_cache[px];
-            int   cy  = trace_bottom - (int)(val * (float)trace_h);
-            int   sx  = trace_left + px;
-            for (int fy = cy + 1; fy < trace_bottom; ) {
-                float ft  = (float)(fy - cy) / (float)(trace_bottom - cy);
-                float a   = (1.0f - ft*ft) * 0.06f;
-                if (a < 0.01f) break;
-                uint16_t col = lerp_col16(BG_COLOR, HEADER_COLOR, a);
-                int re = fy + 1;
-                while (re < trace_bottom) {
-                    float ft2 = (float)(re - cy) / (float)(trace_bottom - cy);
-                    float a2  = (1.0f - ft2*ft2) * 0.06f;
-                    if (a2 < 0.01f || lerp_col16(BG_COLOR, HEADER_COLOR, a2) != col) break;
-                    re++;
-                }
-                spr.fillRect(sx, fy, 1, re - fy, col);
-                fy = re;
+        if (n >= 2) {
+            uint16_t fill_col = lerp_col16(BG_COLOR, accent, 0.14f);
+            for (int px = 0; px <= PLOT_W; px++) {
+                float t  = (float)px * (float)(n - 1) / (float)PLOT_W;
+                int   i0 = (int)t;
+                if (i0 > n - 2) i0 = n - 2;
+                int y = (int)((float)ys[i0]
+                              + (float)(ys[i0 + 1] - ys[i0]) * (t - (float)i0) + 0.5f);
+                if (y < PLOT_BOTTOM)
+                    spr.drawFastVLine(SX + px, y + 1, PLOT_BOTTOM - y - 1, fill_col);
+            }
+            for (int i = 0; i < n - 1; i++) {
+                spr.drawLine(xs[i], ys[i],     xs[i + 1], ys[i + 1],     accent);
+                spr.drawLine(xs[i], ys[i] + 1, xs[i + 1], ys[i + 1] + 1, accent);
             }
         }
 
-        // Curve — 50% opacity stroke
-        uint16_t curve_col = lerp_col16(BG_COLOR, HEADER_COLOR, 0.50f);
-        uint16_t curve_dim = lerp_col16(BG_COLOR, HEADER_COLOR, 0.30f);
-        for (int px = 1; px <= trace_w; px++) {
-            float v0 = curve_cache[px-1], v1 = curve_cache[px];
-            int y0 = trace_bottom - (int)(v0 * (float)trace_h);
-            int y1 = trace_bottom - (int)(v1 * (float)trace_h);
-            spr.drawLine(trace_left+px-1, y0,   trace_left+px, y1,   curve_col);
-            spr.drawLine(trace_left+px-1, y0-1, trace_left+px, y1-1, curve_dim);
+        // Cold start: make a five-point plot read as deliberate, not broken.
+        if (n < 8)
+            for (int i = 0; i < n; i++) spr.fillCircle(xs[i], ys[i], 2, accent);
+
+        // Peak tick. Dropped once the peak scrolls out of the window rather than
+        // re-pointed at the in-window maximum — that would contradict the hero.
+        if (peak_seq >= 0 && peak_seq >= trace_total - n) {
+            int pi = (int)(peak_seq - (trace_total - n));
+            if (pi >= 0 && pi < n)
+                spr.drawFastVLine(xs[pi], 104 - CONTENT_Y,
+                                  PLOT_BOTTOM - (104 - CONTENT_Y) + 1, TEXT_COLOR);
         }
 
-        // Peak diamond
-        if (trace_max_idx >= 0 && trace_max_rssi >= peak_rssi - 2) {
-            int ppx = (int)((float)trace_max_idx / (float)(trace_count-1) * (float)trace_w);
-            float pv = trace_vals[trace_max_idx];
-            int   pdy = trace_bottom - (int)(pv * (float)trace_h);
-            int   sx  = trace_left + ppx;
-            uint16_t dash_col = lerp_col16(BG_COLOR, CAUTION_COLOR, 0.3f);
-            for (int dy = pdy + 4; dy < trace_bottom; dy += 6) {
-                int seg = (dy + 3 < trace_bottom) ? 3 : (trace_bottom - dy);
-                spr.drawFastVLine(sx, dy, seg, dash_col);
-            }
-            spr.fillTriangle(sx, pdy-4, sx+3, pdy, sx-3, pdy, CAUTION_COLOR);
-            spr.fillTriangle(sx, pdy+4, sx+3, pdy, sx-3, pdy, CAUTION_COLOR);
-        }
+        // No current dot once the signal is lost — the trace is on the floor and
+        // there is nothing current to mark.
+        if (!is_lost) spr.fillCircle(xs[n - 1], ys[n - 1], 2, TEXT_COLOR);
 
-        // Current-position dot
-        {
-            float vc = curve_cache[trace_w < 240 ? trace_w : 240];
-            int   yc = trace_bottom - (int)(vc * (float)trace_h);
-            spr.drawCircle(trace_right, yc, 4, lerp_col16(BG_COLOR, HEADER_COLOR, 0.3f));
-            spr.fillCircle(trace_right, yc, 2, HEADER_COLOR);
-        }
-
-    } else if (trace_count == 1) {
-        // Single dot before the curve can form
-        float n = sig_trace_smooth[0];
-        int dot_y = trace_bottom - (int)(n * (float)trace_h);
-        if (dot_y < trace_top)    dot_y = trace_top;
-        if (dot_y > trace_bottom) dot_y = trace_bottom;
-        spr.drawCircle(trace_right, dot_y, 4, lerp_col16(BG_COLOR, HEADER_COLOR, 0.3f));
-        spr.fillCircle(trace_right, dot_y, 2, HEADER_COLOR);
-
-    } else {
-        // No samples — animated scanning indicator
-        char dots[4];
-        anim_ellipsis(dots, sizeof(dots));
-        char scanning[16];
-        snprintf(scanning, sizeof(scanning), "scanning%s", dots);
-        int msg_w = (int)strlen(scanning) * (ts_char_w(TS_MICRO) + 1);
-        spr.setTextColor(DIM_COLOR, BG_COLOR);
-        spr.setTextSize(TS_MICRO);
-        spr.setCursor((DISP_W - msg_w) / 2, trace_top + trace_h / 2 - 4);
-        kprint(spr, scanning);
+        spr.clearClipRect();
     }
-
-    spr.clearClipRect();
 }
 
 void draw_gps_screen() {
@@ -10566,20 +10502,11 @@ void draw_current_screen() {
 
 void transition_screen(int new_screen, int dir) {
     screen_dirty = true;
-    if (stealth_mode) { current_screen = new_screen; return; }
     if (!is_muted) M5Cardputer.Speaker.tone(660, 5);
 
     // Flush queued deletes whenever we leave the history screen
     if (current_screen == 2 && new_screen != 2 && pending_delete_count > 0)
         flush_pending_deletes();
-
-    // Signal screen curve cache — alloc on enter, free on leave
-    if (new_screen == 1 && !signal_curve_cache)
-        signal_curve_cache = (float*)malloc(241 * sizeof(float));
-    if (current_screen == 1 && new_screen != 1 && signal_curve_cache) {
-        free(signal_curve_cache);
-        signal_curve_cache = nullptr;
-    }
 
     // Screen-specific setup (same as before)
     if (new_screen == 0) {
@@ -11065,9 +10992,11 @@ static void c5_push_signatures() {
 
 // Mirror this device's own LED state onto the C5 so the pair glows as one
 // instrument. The gating expression is lifted from LedTask deliberately — the
-// C5 must go dark in exactly the cases the Cardputer's LED does. Stealth is the
-// one that actually matters: a C5 breathing away on the Grove port after the
-// Cardputer went dark would defeat the whole point of stealth mode.
+// C5 must go dark in exactly the cases the Cardputer's LED does, so the two
+// read as one instrument rather than two devices with opinions. A C5 breathing
+// away on the Grove port beside a Cardputer that has deliberately gone dark —
+// night mode, low power, or a brightness level its LED cannot physically reach
+// — reads as a malfunction, and gives away a device the user dimmed on purpose.
 // Sent only on change (the C5 latches the last value), and unknown tags are
 // ignored in both directions, so this needs no PROTOCOL_VERSION bump.
 static void c5_push_led_state(bool force) {
@@ -11080,7 +11009,7 @@ static void c5_push_led_state(bool force) {
     // (backlight boost rail), so holding the C5 to the same condition is what
     // makes the pair behave as one instrument rather than the C5 glowing beside
     // a Cardputer that has gone dark.
-    bool on = !stealth_mode && !night_mode
+    bool on = !night_mode
               && (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
     int r = export_on ? 255 : (int)led_r;
     int g = export_on ? 130 : (int)led_g;
@@ -11658,7 +11587,6 @@ void setup() {
     }
     // Apply persisted settings that require hardware calls after load
     if (night_mode)     apply_color_palette();
-    if (stealth_mode)      M5Cardputer.Display.setBrightness(5);
     if (is_muted)       M5Cardputer.Speaker.setVolume(0);
     if (c5_enabled)        c5_link_begin();   // bring up 5 GHz C5 link if enabled
     Serial.printf("[BOOT] Free heap after LittleFS: %u\n",
@@ -11868,15 +11796,13 @@ void setup() {
         // stop() flushes stale I2S DMA (same trick AlarmTask uses) instead of
         // the end()/begin() cycle that caused the DC-transient "pop". Higher
         // pitch + volume so the small speaker actually reproduces it.
-        if (!stealth_mode) {
-            M5Cardputer.Speaker.stop();
-            delay(10);
-            M5Cardputer.Speaker.setVolume(150);
-            M5Cardputer.Speaker.tone(640, 160); delay(190);
-            M5Cardputer.Speaker.tone(480, 160); delay(190);
-            M5Cardputer.Speaker.tone(540, 220); delay(260);
-            M5Cardputer.Speaker.stop();
-        }
+        M5Cardputer.Speaker.stop();
+        delay(10);
+        M5Cardputer.Speaker.setVolume(150);
+        M5Cardputer.Speaker.tone(640, 160); delay(190);
+        M5Cardputer.Speaker.tone(480, 160); delay(190);
+        M5Cardputer.Speaker.tone(540, 220); delay(260);
+        M5Cardputer.Speaker.stop();
         M5Cardputer.Speaker.setVolume(is_muted ? 0 : current_volume);
 
         // Phase 3: Hold on title card (~2 seconds). Rendered through the
@@ -11971,7 +11897,7 @@ static void service_battery_warnings(int32_t loop_mv) {
             turbo_mode_active = false;
             low_power_mode = true;
             setCpuFrequencyMhz(80);
-            if (!stealth_mode && !ambient_mode)
+            if (!ambient_mode)
                 M5Cardputer.Display.setBrightness(effective_brightness());
             apply_ble_scan_params();      // applies 50%-duty BLE params
             gps_standby(true);            // GPS to standby: biggest cuttable load
@@ -12190,7 +12116,7 @@ static void display_wake_from_idle() {
 
 static void service_ambient_mode() {
     // Enter ambient mode after sustained idle
-    if (!ambient_mode && !stealth_mode && !toast_active && !signal_active && !export_mode_active &&
+    if (!ambient_mode && !toast_active && !signal_active && !export_mode_active &&
         (millis() - last_user_input_ms) > current_ambient_timeout_ms()) {
         ambient_mode = true;
         show_feed_expanded = false;
@@ -12203,7 +12129,7 @@ static void service_ambient_mode() {
     }
 
     // Deeper tier: kill the backlight entirely after a longer idle.
-    if (ambient_mode && !screen_off_mode && !stealth_mode && !toast_active
+    if (ambient_mode && !screen_off_mode && !toast_active
         && !signal_active && !export_mode_active
         && (millis() - last_user_input_ms) > current_screen_off_timeout_ms()) {
         screen_off_mode = true;
@@ -12390,7 +12316,7 @@ static void service_ble_restart() {
 
 static void redraw_now() { draw_current_screen(); render_frame(); }
 
-static void service_stealth_and_stats_render() {
+static void service_stats_render() {
     if (screen_off_mode) return;   // panel asleep — compositing would be wasted
     if (ambient_mode) {
         // Render the normal scanner screen at reduced framerate (~15 fps).
@@ -12404,19 +12330,6 @@ static void service_stealth_and_stats_render() {
             // Ambient is a brightness/framerate state, not a navigation event.
             redraw_now();
             last_ambient_draw = now_amb;
-        }
-    } else if (stealth_mode) {
-        // Minimal stealth render: tiny dim "S" in bottom-right corner every 2s.
-        static unsigned long last_stealth_draw = 0;
-        if (millis() - last_stealth_draw > 2000) {
-            spr.fillSprite(BG_COLOR);
-            uint16_t s_col = lerp_col16(BG_COLOR, lgfx::color565(180, 30, 30), 0.6f);
-            spr.setTextColor(s_col, BG_COLOR);
-            spr.setTextSize(TS_MICRO);
-            spr.setCursor(DISP_W - 8, SPR_H - 9);
-            spr.print("S");
-            render_frame();
-            last_stealth_draw = millis();
         }
     } else {
         static unsigned long last_fast_anim = 0; static unsigned long last_slow_ui = 0; unsigned long now = millis();
@@ -12509,7 +12422,7 @@ static void handle_keyboard_input() {
         }
         Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
         
-        if (status.tab && !stealth_mode) {
+        if (status.tab) {
             show_help_overlay = !show_help_overlay;
             if (show_help_overlay) {
                 show_feed_expanded = false;
@@ -12657,7 +12570,7 @@ static void handle_keyboard_input() {
 
 
 
-            if (c == 0x1B && !stealth_mode) {  // ASCII Escape
+            if (c == 0x1B) {  // ASCII Escape
                 // Priority order: close overlays first, then navigate home.
                 if (export_mode_active || export_connecting) {
                     export_mode_stop();
@@ -12693,20 +12606,18 @@ static void handle_keyboard_input() {
                 // Already on scanner with no overlays — nothing to do.
             }
             else if (c == 'm') {
-                if (!stealth_mode) {
-                    menu_open = !menu_open;
-                    stats_clear_confirming = false;   // every open/close starts disarmed
-                    if (menu_open) {
-                        show_feed_expanded = false;
-                        menu_open_ms = millis();
-                        menu_scroll_offset = 0;
-                        menu_scroll_y_f    = 0.0f;
-                        menu_last_frame_ms = 0;
-                        menu_sel_y_seeded  = false;
-                        menu_click();
-                    }
-                    screen_dirty = true;
+                menu_open = !menu_open;
+                stats_clear_confirming = false;   // every open/close starts disarmed
+                if (menu_open) {
+                    show_feed_expanded = false;
+                    menu_open_ms = millis();
+                    menu_scroll_offset = 0;
+                    menu_scroll_y_f    = 0.0f;
+                    menu_last_frame_ms = 0;
+                    menu_sel_y_seeded  = false;
+                    menu_click();
                 }
+                screen_dirty = true;
             }
             else if (c == '`') {
                 // This key is labeled "esc" — during export it must act like
@@ -12795,7 +12706,7 @@ static void handle_keyboard_input() {
                     draw_current_screen(); render_frame();
                     continue;
                 }
-                if (!stealth_mode && !screen_transitioned) {
+                if (!screen_transitioned) {
                     int prev = screen_step(current_screen, -1);
                     // Slide forward only when we wrapped past the start.
                     int d = (prev > current_screen) ? 1 : -1;
@@ -12810,7 +12721,7 @@ static void handle_keyboard_input() {
                     draw_current_screen(); render_frame();
                     continue;
                 }
-                if (!stealth_mode && !screen_transitioned) {
+                if (!screen_transitioned) {
                     int next = screen_step(current_screen, +1);
                     // Slide backward only when we wrapped past the end.
                     int d = (next < current_screen) ? -1 : 1;
@@ -12845,7 +12756,7 @@ static void handle_keyboard_input() {
                 screen_dirty = true;
             }
             else if (c == 'v') {
-                if (!stealth_mode && current_screen == 0) {
+                if (current_screen == 0) {
                     int prev_mode = scanner_viz_mode;
                     scanner_viz_mode = (scanner_viz_mode + 1) % SCANNER_VIZ_COUNT;
                     screen_dirty = true;
@@ -12854,7 +12765,7 @@ static void handle_keyboard_input() {
                 }
             }
             else if (c == 'd') {
-                if (!stealth_mode && current_screen == 2 && hist_detail_open) {
+                if (current_screen == 2 && hist_detail_open) {
                     if (hist_delete_confirming) {
                         // Second press of 'd' also confirms (alternative to ENTER)
                         perform_detection_delete(history_selected_idx);
@@ -12868,7 +12779,7 @@ static void handle_keyboard_input() {
                 }
             }
             else if (c == 'w') {
-                if (!stealth_mode && current_screen == 2 && hist_detail_open && !hist_delete_confirming) {
+                if (current_screen == 2 && hist_detail_open && !hist_delete_confirming) {
                     int hist_total = sd_available ? sd_hist_count : capture_history_count;
                     if (hist_total > 0) {
                         const char* mac_to_wl = "";
@@ -12894,38 +12805,36 @@ static void handle_keyboard_input() {
             }
 #if DEBUG_KEYS
             else if (c == 'x') {
-                if (!stealth_mode) {
-                    static bool sim_wifi = true;
-                    char fake_mac[18];
-                    snprintf(fake_mac, sizeof(fake_mac), "00:11:22:33:%02X:%02X", random(0, 255), random(0, 255));
+                static bool sim_wifi = true;
+                char fake_mac[18];
+                snprintf(fake_mac, sizeof(fake_mac), "00:11:22:33:%02X:%02X", random(0, 255), random(0, 255));
 
-                    if (sim_wifi) {
-                        log_detection("SIMULATION", "WIFI", random(-80, -30), fake_mac, "Test_WiFi", 6, 0, "Beacon", "manual_test", 100, 1);
-                        xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-                        session_flock_wifi--; session_wifi--; lifetime_wifi--;
-                        lifetime_flock_total--;
-                        xSemaphoreGiveRecursive(dataMutex);
-                    } else {
-                        log_detection("SIMULATION", "BLE", random(-90, -40), fake_mac, "Test_BLE", 0, 0, "Adv", "manual_test", 100, 1);
-                        xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-                        session_flock_ble--; session_ble--; lifetime_ble--;
-                        lifetime_flock_total--;
-                        xSemaphoreGiveRecursive(dataMutex);
-                    }
-                    // Set alarm trigger under mutex — both fields together,
-                    // matching the producer pattern in process_wifi_event_queue
-                    // and ble_worker_task.
+                if (sim_wifi) {
+                    log_detection("SIMULATION", "WIFI", random(-80, -30), fake_mac, "Test_WiFi", 6, 0, "Beacon", "manual_test", 100, 1);
                     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
-                    trigger_alarm_confidence = 100;
-                    trigger_alarm_source = sim_wifi ? 0 : 1;  // 0=WiFi, 1=BLE
+                    session_flock_wifi--; session_wifi--; lifetime_wifi--;
+                    lifetime_flock_total--;
                     xSemaphoreGiveRecursive(dataMutex);
-
-                    sim_wifi = !sim_wifi;
+                } else {
+                    log_detection("SIMULATION", "BLE", random(-90, -40), fake_mac, "Test_BLE", 0, 0, "Adv", "manual_test", 100, 1);
+                    xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
+                    session_flock_ble--; session_ble--; lifetime_ble--;
+                    lifetime_flock_total--;
+                    xSemaphoreGiveRecursive(dataMutex);
                 }
+                // Set alarm trigger under mutex — both fields together,
+                // matching the producer pattern in process_wifi_event_queue
+                // and ble_worker_task.
+                xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
+                trigger_alarm_confidence = 100;
+                trigger_alarm_source = sim_wifi ? 0 : 1;  // 0=WiFi, 1=BLE
+                xSemaphoreGiveRecursive(dataMutex);
+
+                sim_wifi = !sim_wifi;
             }
 #endif // DEBUG_KEYS
             else if (c == 't') {
-                if (!stealth_mode && show_feed_expanded) {
+                if (show_feed_expanded) {
                     if (scan_local_count > 0 && feed_expanded_selected < scan_local_count) {
                         int idx = (scan_local_head - feed_expanded_selected + FEED_SIZE * 2) % FEED_SIZE;
                         FeedEntry& fe = scan_local_feed[idx];
@@ -12941,7 +12850,7 @@ static void handle_keyboard_input() {
                             transition_screen(SCREEN_TARGET, 1);
                         }
                     }
-                } else if (!stealth_mode && current_screen == 2 && hist_detail_open) {
+                } else if (current_screen == 2 && hist_detail_open) {
                     // Target the detection currently shown in detail view
                     const char* t_mac = "";
                     const char* t_name = "";
@@ -12963,7 +12872,7 @@ static void handle_keyboard_input() {
                         hist_detail_open = false;
                         transition_screen(SCREEN_TARGET, 1);
                     }
-                } else if (!stealth_mode && capture_history_count > 0) {
+                } else if (capture_history_count > 0) {
                     static int target_select_idx = -1;
                     xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
                     int current_hist_count = capture_history_count;
@@ -12978,52 +12887,47 @@ static void handle_keyboard_input() {
                     signal_start(t_mac, t_name, t_type, t_id);
                     trigger_toast("TARGET", t_name, t_conf);
                     transition_screen(SCREEN_TARGET, 1);
-                } else if (!stealth_mode) {
+                } else {
                     trigger_toast("INFO", "No targets yet", 0);
                 }
             }
             else if (c == 'b') {
-                if (!stealth_mode) {
-                    brightness_level = (brightness_level + 1) % 4;
-                    M5Cardputer.Display.setBrightness(effective_brightness());
-                    // Disable LED at dim levels, re-enable at full brightness
-                    if (brightness_level < 3) {
-                        led_breathing_on = false;
-                    } else {
-                        led_breathing_on = true;
-                    }
-                    // On-screen feedback — and the reason nothing visibly
-                    // changes in low power, which pins the backlight to the
-                    // ambient dim regardless of the selected level.
-                    if (low_power_mode) {
-                        set_toast_direct("LOW POWER LOCKS DIM", TOAST_WARNING);
-                    } else {
-                        char bmsg[16];
-                        snprintf(bmsg, sizeof(bmsg), "BRIGHTNESS %d/4", brightness_level + 1);
-                        set_toast_direct(bmsg, TOAST_NEUTRAL);
-                    }
-                    schedule_persist();
+                brightness_level = (brightness_level + 1) % 4;
+                M5Cardputer.Display.setBrightness(effective_brightness());
+                // Disable LED at dim levels, re-enable at full brightness
+                if (brightness_level < 3) {
+                    led_breathing_on = false;
+                } else {
+                    led_breathing_on = true;
                 }
+                // On-screen feedback — and the reason nothing visibly
+                // changes in low power, which pins the backlight to the
+                // ambient dim regardless of the selected level.
+                if (low_power_mode) {
+                    set_toast_direct("LOW POWER LOCKS DIM", TOAST_WARNING);
+                } else {
+                    char bmsg[16];
+                    snprintf(bmsg, sizeof(bmsg), "BRIGHTNESS %d/4", brightness_level + 1);
+                    set_toast_direct(bmsg, TOAST_NEUTRAL);
+                }
+                schedule_persist();
             }
-            else if (c == 's') { stealth_mode = !stealth_mode; if (stealth_mode) { M5Cardputer.Display.setBrightness(5); } else { M5Cardputer.Display.setBrightness(effective_brightness()); draw_current_screen(); render_frame(); } schedule_persist(); }
             else if (c == 'n') {
-                if (!stealth_mode) {
-                    night_mode = !night_mode;
-                    apply_color_palette();
-                    screen_dirty = true;
-                    schedule_persist();
-                    if (night_mode) {
-                        set_toast_direct("NIGHT MODE", TOAST_SUCCESS);
-                    } else {
-                        set_toast_direct("DAY MODE", TOAST_NEUTRAL);
-                    }
+                night_mode = !night_mode;
+                apply_color_palette();
+                screen_dirty = true;
+                schedule_persist();
+                if (night_mode) {
+                    set_toast_direct("NIGHT MODE", TOAST_SUCCESS);
+                } else {
+                    set_toast_direct("DAY MODE", TOAST_NEUTRAL);
                 }
             }
             else if (c == 'c') {
-                if (!stealth_mode) enter_charge_mode_reboot();
+                enter_charge_mode_reboot();
             }
             else if (c == 'l') {
-                if (signal_active && !stealth_mode) {
+                if (signal_active) {
                     signal_stop();
                     trigger_toast("TARGET", "Target cleared", 0);
                     beep(500, 60);
@@ -13059,25 +12963,23 @@ static void handle_keyboard_input() {
                 }
             }
             else if (c == 'f') {
-                if (!stealth_mode) {
-                    if (show_feed_expanded) {
-                        show_feed_expanded = false;
-                    } else {
-                        if (current_screen != 0 && current_screen != 1) transition_screen(0, -1);
-                        menu_open        = false;
-                        show_help_overlay = false;
-                        wifi_config_open  = false;
-                        show_feed_expanded = true;
-                        feed_expand_ms = millis();
-                        feed_expanded_selected = 0;
-                        feed_expanded_offset   = 0;   // open at the newest entry
-                    }
-                    draw_current_screen();
-                    render_frame();
+                if (show_feed_expanded) {
+                    show_feed_expanded = false;
+                } else {
+                    if (current_screen != 0 && current_screen != 1) transition_screen(0, -1);
+                    menu_open        = false;
+                    show_help_overlay = false;
+                    wifi_config_open  = false;
+                    show_feed_expanded = true;
+                    feed_expand_ms = millis();
+                    feed_expanded_selected = 0;
+                    feed_expanded_offset   = 0;   // open at the newest entry
                 }
+                draw_current_screen();
+                render_frame();
             }
             else if (c == '\n' || c == '\r') {
-                if (!stealth_mode && current_screen == 2) {
+                if (current_screen == 2) {
                     int hist_total = sd_available ? sd_hist_count : capture_history_count;
                     if (hist_total > 0) {
                         if (hist_detail_open && hist_delete_confirming) {
@@ -13103,7 +13005,7 @@ static void handle_keyboard_input() {
         // ENTER in status.word. Check status.enter directly only when the
         // loop above didn't already act on it (firmwares that report ENTER
         // in both places would otherwise toggle every action twice).
-        if (status.enter && !enter_consumed && !stealth_mode) {
+        if (status.enter && !enter_consumed) {
             if (wifi_config_open) {
                 if (wifi_config_editing) {
                     wifi_config_editing = false;
@@ -13164,7 +13066,7 @@ static void handle_keyboard_input() {
             }
         }
 
-        if (status.del && !stealth_mode) {
+        if (status.del) {
             // DEL = universal "close / go back" — priority order:
             if (wifi_config_open) {
                 if (wifi_config_editing) {
@@ -13377,7 +13279,7 @@ void loop() {
     }
     if (wdt_subscribed) esp_task_wdt_reset();
 
-    if (M5Cardputer.BtnA.wasClicked() && !stealth_mode) {
+    if (M5Cardputer.BtnA.wasClicked()) {
         last_user_input_ms = millis();
         if (ambient_mode) {
             display_wake_from_idle();
@@ -13436,6 +13338,6 @@ void loop() {
 
     service_ambient_mode();
 
-    service_stealth_and_stats_render();
+    service_stats_render();
     vTaskDelay(10 / portTICK_PERIOD_MS);
 }

@@ -106,7 +106,6 @@ Cards: Session Detections / Lifetime Detections, WiFi / BLE / Raven, Session Upt
 | `` ` `` | Toggle mute |
 | `n` | Toggle night mode |
 | `b` | Cycle brightness (dim / mid / full) |
-| `s` | Toggle stealth mode (screen nearly off) |
 | `c` | Charge Mode — reboot into radios-off charging with a live status screen (press any key to start the app) |
 | `f` | Toggle expanded feed overlay |
 | `t` | Target device for signal tracking |
@@ -367,7 +366,7 @@ From the Detections detail view, press `w` to whitelist a MAC address. Whitelist
 
 Session state, lifetime stats, detection IDs, and user settings are saved to LittleFS flash every 60 seconds via a dedicated one-shot task on Core 1 (never blocks the main loop). Atomic writes with temp file + rename to protect against power-loss corruption. What persists across reboots:
 
-Night mode, brightness, low power, stealth, mute, turbo, WiFi credentials (AES-encrypted), lifetime counters, next detection ID, volume level.
+Night mode, brightness, low power, mute, turbo, WiFi credentials (AES-encrypted), lifetime counters, next detection ID, volume level.
 
 Flash wear monitoring toasts at 80K writes (warning) and 100K (critical).
 
@@ -452,4 +451,4 @@ MIT — see [LICENSE](LICENSE) for full text.
 
 ---
 
-**v1.2**
+**v1.3**

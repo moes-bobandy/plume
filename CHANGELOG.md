@@ -2,6 +2,99 @@
 
 All notable changes to Plume are recorded here.
 
+## v1.3
+
+The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
+a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
+unchanged from v1.2 and does not need reflashing.
+
+### Removed — stealth mode
+
+- **Stealth mode is gone.** One keypress (`s`) dimmed the screen to brightness 5,
+  suppressed the LED, and suppressed detection alarms — and it persisted across
+  reboots. Toggle it, forget it, and you had a device that looked dead, sounded
+  dead, and silently declined to alert on a real camera. The three suppressions
+  were bundled with no indication beyond a 6×8 pixel "S" in the bottom-right
+  corner, on a screen dimmed almost to black.
+- No migration code. The settings loader is an `if`/`else if` chain with no final
+  `else`, so a `stealth=1` line left in an existing session file is ignored on
+  read and dropped on the next write. Devices with it set come back at normal
+  brightness on their own.
+- `s` is now unbound globally. It is still live inside the WiFi-config overlay,
+  where it toggles plaintext password reveal — that handler is overlay-local and
+  untouched.
+- `PERSIST_MIN_BYTES` retuned to 120 and its field list corrected. The comment
+  had listed 15 fields since before `turbo` and `c5` were added, so the stated
+  sum of 130 described a file layout that had not existed for two releases while
+  the true floor was 143.
+
+After this: `is_muted` is the only audio suppression path, ambient mode is the
+only automatic backlight reduction, and every detection above threshold produces
+an audible alarm unless the user has explicitly muted.
+
+### Fixed — the export page phoned home
+
+- **The export page no longer contacts any third party.** Its stylesheet opened
+  with an `@import` from `fonts.googleapis.com` for JetBrains Mono and Share Tech
+  Mono, so every time the page was opened the browser handed Google an IP
+  address, a timestamp, and a referrer — from a tool whose whole pitch is "no
+  network connection, no cloud." The README said one thing and the page did
+  another.
+- Both faces are replaced by one system stack (`ui-monospace`, SF Mono, Menlo,
+  Consolas, Liberation Mono), defined once as `--mono` and referenced by all five
+  rules that used to name a webfont. The page now renders fully offline, which
+  matters beyond privacy: export mode runs the device as its own access point,
+  so the client usually has no route to the internet at all — those fonts were
+  never going to load anyway, and the page was paying a DNS timeout for them.
+- Losing the two-face distinction costs nothing. `.ht`, `.sl`, and `.kv2` carry
+  their identity through letter-spacing, uppercase, and accent colour, not the
+  typeface. The one real degradation is that system mono stacks rarely ship the
+  intermediate weights, so `font-weight:500`/`600` now round to normal or bold.
+- 128 bytes smaller in flash.
+
+### Changed — Signal screen, rebuilt to spec
+
+Rebuilt against the `design_handoff_signal_screen` handoff. The screen now answers
+one question — is this getting stronger or weaker, and how close have I ever
+gotten? Still no distance readout: RSSI is relative, so a foot/metre figure would
+be a lie. Everything on it is dBm, percent of scale, or elapsed time.
+
+- **Peak dBm is the hero, not the live reading.** The live value flickers several
+  dB between adverts, so the big numeral used to jitter constantly and blank to
+  `--` on every dropout. Peak only ever improves, which is also the number you
+  actually care about when walking a perimeter.
+- **`SEEN <n>s AGO` replaces the blank state.** An age is always printable, so
+  there is no longer a reading that vanishes and reappears.
+- **Peak-hold meter.** The fill follows the live level and eases; a white hairline
+  parks at the strongest reading and never falls back while the target is held.
+- **Trace is a plain polyline with a solid 14% fill**, replacing the Catmull-Rom
+  spline and its per-column alpha ramp. The x axis scales to the samples on hand
+  and pins at two minutes, so a fresh target plots full width instead of a stub
+  in an empty box; under 8 samples it draws vertex dots so a short plot reads as
+  deliberate. A white tick marks where the peak happened, and is dropped once the
+  peak scrolls out of the window rather than re-pointed at the in-window maximum,
+  which would contradict the hero value.
+- **Protocol glyph** — purple diamond for BLE, teal triangle for WiFi, matching
+  the Scanner contact shapes. It stays on the identity colour when the target
+  goes stale; it is what the thing *is*, not how it is doing.
+- Status pill is `TRACKING` / `HUNTING` / `STALE`. HUNTING is amber now — it was
+  mint, which had a confirmed Flock device reading calmer than an unknown one.
+- Visualization range widened from −70…−30 dBm to −95…−45 (trace) and −95…−40
+  (meter). The old floor clamped anything past about 20 m to zero, so the plot
+  sat flat for most of an approach.
+- Dropped: the CLOSER/FARTHER trend chip and the `(#nnn)` detection ID, both
+  covered better by the trace and the Detections screen respectively.
+- Frees the 964-byte curve cache that was malloc'd on entering the screen, and
+  240 bytes of static smoothing state.
+
+### Known issues
+
+- The Signal screen's `LOST` gate (10 s, empties the meter and floors the trace)
+  fires before the `STALE` gate (30 s, turns the labelling amber) — deliberate,
+  so the live elements react faster than the wording, but it does mean a target
+  can sit with an empty meter while the pill still reads TRACKING. Both are
+  untuned guesses against real advertisement intervals.
+
 ## v1.2
 
 Detection accuracy, power, and a UI pass. Both firmwares changed — the Cardputer
@@ -149,9 +242,10 @@ CID plus Wireshark and Nmap). Only one of the nine was Flock Safety.
   I2C or keyboard failure: the battery is ADC1/GPIO10 with no I2C involved, while
   the TCA8418 is the only device on the bus. The boot-time health check now
   covers the keyboard case separately.
-- Stealth mode still emits key clicks on the WiFi-config screen — five bare
-  `Speaker.tone()` calls there bypass `beep()` and its stealth/mute guards.
-  Fixing it would also unblock powering the I2S amp down when muted.
+- Mute still leaks on the WiFi-config screen — five bare `Speaker.tone()` calls
+  there bypass `beep()` and its guards, so key clicks sound even with mute on.
+  Removing stealth mode did not fix this: those calls never consulted `is_muted`
+  either. Fixing it would also unblock powering the I2S amp down when muted.
 - The charge screen maps voltage through the discharge curve while charging, so
   the percentage reads optimistically, and `CHARGE_MODE_FULL_MV` (4150) tops out
   at 95%.
