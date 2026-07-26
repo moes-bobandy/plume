@@ -59,7 +59,6 @@ static void draw_overlay_header_lcd(const char* label);
 static void render_frame();
 void draw_toast_spr();
 void draw_vol_overlay();
-void drawCard(int x, int y, int w, int h);
 static void drawPill(int x, int y, const char* text, uint16_t accent_col,
                      float bg_accent_pct = 0.18f, bool filled = false);
 void draw_current_screen();
@@ -6121,10 +6120,6 @@ void draw_vol_overlay() {
             }
         }
     }
-}
-
-void drawCard(int x, int y, int w, int h) {
-    spr.fillRect(x, y, w, h, CARD_COLOR); spr.drawRect(x, y, w, h, CARD_BORDER);
 }
 
 // Draw a header-bar status pill: rounded rect with text inside.
