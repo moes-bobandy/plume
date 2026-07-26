@@ -8,6 +8,40 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Changed — dead asset, boot dissolve, struct packing
+
+Three unrelated cleanups. **None of the three changes behaviour** — the audio
+path, the visual result of the boot fade, and MAC dedup all work exactly as
+before.
+
+- **Removed the unused `ui_beep` audio asset.** `ui_beep.h` carried a
+  3,609-sample 16-bit PCM clip — 22 KB of source converted from an mp3 — and
+  nothing referenced `ui_beep_pcm`, `UI_BEEP_SAMPLES`, `UI_BEEP_RATE`, or
+  `HAS_UI_BEEP`. `Speaker.playRaw()` is never called; the header's own usage
+  comment was the only thing that described how to play it. The build came out
+  byte-identical, since an unreferenced `static const` array was already being
+  discarded. The real audio path — `beep()`, `play_escalated_alarm()`,
+  `AlarmTask`, all 19 `Speaker.tone()` sites — is untouched.
+- **The boot dissolve writes the sprite buffer directly.** Phase 4 faded the
+  scanner in with a nested `readPixel`/`drawPixel` loop over 240×115: roughly 1.7
+  million of each call across the ~62 frames, every one paying bounds checks and
+  colour-format dispatch to touch one pixel of a flat array. Now a single linear
+  pass using `read_pixel_logical`/`write_pixel_logical`, the same accessors the
+  scanner viz uses. Byte-order detection is now called explicitly instead of
+  being inherited — it previously happened only as a side effect of
+  `draw_scanner_viz_scan()` running inside `draw_current_screen()`, which held
+  purely because `scanner_viz_mode` defaults to 0. `getBuffer()` can return null,
+  so the original loop is kept as a fallback and the fade still runs in that
+  case. Duration, frame delay, and alpha math unchanged; costs 72 bytes of flash
+  for the retained fallback.
+- **`SeenMacEntry` reordered to drop 256 bytes of padding.** `char mac[18]`
+  leading forced 2 bytes before `ts` and 3 at the tail — 28 bytes per instance.
+  Leading with the 4-byte-aligned member gives 24. At 64 instances
+  (`seen_mac_table[32]` plus the `static temp[32]` in `seen_mac_expire`) that is
+  256 bytes of DRAM, and the build confirms it to the byte: 81,896 → 81,640. No
+  call site changed — checked specifically for positional initializers, which
+  would have silently misassigned under the new order, and there are none.
+
 ### Removed — dead code, second pass
 
 Five commits, no behavioural change. Every item had zero readers.
