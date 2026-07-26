@@ -1366,10 +1366,6 @@ static bool          signal_bar_seeded = false;
 static long signal_peak_seq  = -1;
 static long sig_trace_total  = 0;
 
-// ── Peak GPS bookmark ──
-static double signal_peak_lat     = 0.0;
-static double signal_peak_lng     = 0.0;
-static bool   signal_peak_has_gps = false;
 
 TinyGPSPlus gps;
 HardwareSerial SerialGPS(2);
@@ -5050,15 +5046,6 @@ static void signal_feed_rssi(const char* mac, int rssi) {
         // the most recently written sample. Worst case the tick sits one sample
         // (~4 px) off, which is inside the width of the tick itself.
         signal_peak_seq = sig_trace_total - 1;
-        if (gps.location.isValid() && gps.location.age() < 2000) {
-            double lat = gps.location.lat();
-            double lng = gps.location.lng();
-            if (!isnan(lat) && !isnan(lng) && !isinf(lat) && !isinf(lng)) {
-                signal_peak_lat     = lat;
-                signal_peak_lng     = lng;
-                signal_peak_has_gps = true;
-            }
-        }
     }
 
     signal_newest_sample_ms = now;
@@ -5077,7 +5064,6 @@ void signal_start(const char* mac, const char* name, const char* type = "", int 
     signal_peak_rssi = -120;
     signal_peak_seq  = -1;
     sig_trace_total  = 0;
-    signal_peak_lat = 0.0; signal_peak_lng = 0.0; signal_peak_has_gps = false;
 
     signal_tracker_idx = -1;
     signal_newest_sample_ms = 0;
@@ -5106,7 +5092,6 @@ void signal_stop() {
     signal_peak_rssi = -120;
     signal_peak_seq  = -1;
     sig_trace_total  = 0;
-    signal_peak_lat = 0.0; signal_peak_lng = 0.0; signal_peak_has_gps = false;
 
     signal_tracker_idx = -1;
     signal_newest_sample_ms = 0;
