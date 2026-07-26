@@ -8,6 +8,28 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Removed — dead code
+
+Two deletions, no behavioural change to anything reachable.
+
+- **The TIMELINE scanner visualization is gone** (448 lines). `ENABLE_TIMELINE_VIZ`
+  had been 0 for several releases, the README had stopped documenting the TIME
+  viz, and nothing outside the guarded blocks referenced a timeline symbol. The
+  preprocessor was already excluding all of it, so the build came out
+  **byte-identical** — same flash, same DRAM — which is the cleanest possible
+  proof it was unreachable. `SCANNER_VIZ_COUNT` was an `#if`/`#else` pair and is
+  now unconditionally 2; `v` cycles SCAN and LINE. No migration needed —
+  `scanner_viz_mode` is a runtime static and was never persisted, so no saved
+  value can point at the removed mode.
+- **Three unused geo helpers** — `haversine_m()`, `bearing_to()`,
+  `bearing_to_compass()` — each defined once and called from nowhere, left over
+  from a distance/bearing-to-detection feature that was never built. Worth
+  noting for anyone estimating a similar cleanup: this reclaimed **16 bytes**,
+  not the few hundred the non-static linkage suggests. `nm` against the
+  pre-removal ELF shows the linker had already garbage-collected all three out
+  of the flashed image; the symbols survived in debug sections only. The value
+  here is that the file no longer advertises a capability the firmware lacks.
+
 ### Removed — stealth mode
 
 - **Stealth mode is gone.** One keypress (`s`) dimmed the screen to brightness 5,
