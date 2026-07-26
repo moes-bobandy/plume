@@ -452,4 +452,4 @@ MIT — see [LICENSE](LICENSE) for full text.
 
 ---
 
-**v1.0-beta**
+**v1.1**

@@ -19,3 +19,6 @@ Desktop.ini
 *.swp
 *.swo
 *~
+# Reference photos of the device screen (UI work) — keep local, not in history
+PXL_*.jpg
+*.MACRO_FOCUS.jpg
