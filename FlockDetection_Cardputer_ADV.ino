@@ -1,8 +1,23 @@
 ﻿// ============================================================================
-// PLUME v1.0-beta
+// PLUME v1.1
 // ============================================================================
 
 #include <M5Cardputer.h>
+
+// ── Target guard ────────────────────────────────────────────────────────────
+// This repo holds TWO firmwares for TWO different chips: this sketch (ESP32-S3,
+// Cardputer / Cardputer ADV) and c5-sniffer/ (ESP32-C5). Building one with the
+// other's board still selected in the IDE is an easy mistake, and the natural
+// errors are misleading — you get "esp_sleep_enable_ext0_wakeup was not declared"
+// (the C5 has no EXT0 wakeup) and "HardwareSerial has no member setTxTimeoutMs"
+// (no USB-CDC-on-boot, so Serial isn't HWCDC), neither of which hints at the
+// real cause. Fail loudly and specifically instead.
+// MUST sit after the first include: the target macros come in via sdkconfig.h in
+// that chain. Above it the guard compiles but can never fire.
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+#error "Wrong board selected. Plume targets the ESP32-S3 (M5Stack Cardputer / Cardputer ADV). If you were just building c5-sniffer, switch the IDE board back."
+#endif
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <NimBLEDevice.h>
@@ -35,6 +50,17 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ── Feature flags ───────────────────────────────────────────────────────────
+// ENABLE_TIMELINE_VIZ 0 removes the third (TIMELINE) scanner visualization.
+// It cost 6,520 bytes of static DRAM: tl_bins (1,000), three 50-float smoothing
+// arrays (600), norm_buf (200), and four 295-float Catmull-Rom interpolation
+// buffers (4,720). That is the largest reclaimable block in the sketch, and on
+// this part the heap is simply whatever DRAM is left after .bss/.data — so the
+// saving lands directly in free heap, which is what export mode's 15 KB gate
+// needs. Set to 1 to restore: all the code is intact below, guarded by this
+// flag. The pre-removal file is also in git at bde8992.
+#define ENABLE_TIMELINE_VIZ 0
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -81,9 +107,11 @@ static void parse_wifi_event(struct WifiEvent* ev);
 static void update_channel_histogram();
 static void draw_scanner_viz_scan(unsigned long frame_ms);
 static void draw_scanner_viz_spectrum(unsigned long frame_ms);
+#if ENABLE_TIMELINE_VIZ
 static void draw_scanner_viz_timeline(unsigned long frame_ms);
 static void timeline_init(unsigned long frame_ms);
 static void timeline_shift_bins(unsigned long frame_ms);
+#endif
 static inline void compute_sincos(float angle, float* s, float* c);
 void draw_signal_screen();
 void draw_device_info_screen();
@@ -159,6 +187,32 @@ static const uint8_t AMBIENT_BRIGHTNESS = 40;
 // It holds until the cell is essentially full or the user presses a key. On this
 // trickle charger it may never reach full, which is fine: a keypress always exits.
 #define CHARGE_MODE_FULL_MV   4150          // USER-requested: hold above this -> resume the app
+// ── "Not actually charging" watch ───────────────────────────────────────────
+// Nothing on this board reports charge state (isCharging() is always 2/unknown
+// and there is no VBUS line), so a dead cable, a dead port, or an unplug while
+// the charge screen is up is INVISIBLE to us: the loop would hold forever, lit,
+// draining the cell it is supposed to be filling — then brown out, re-enter on
+// the brownout reason, and repeat until the pack is deeply discharged.
+// The only signal available is the cell itself falling. Compare against the
+// RUNNING PEAK, not the entry voltage: dropping the app's load rebounds a tired
+// cell +50..150mV over the first minutes, which would mask a real discharge
+// measured from entry. 40mV is far outside the ±15mV ADC ripple, and 5 minutes
+// under that bar rules out a transient.
+// Tradeoff worth knowing: on the flat middle of the LiPo curve a 40mV fall at
+// this load takes hours, so a stall is confirmed slowly up there. That is the
+// harmless case (the pack is nearly full). Near the knee — the auto-entry case
+// that actually endangers the cell — the curve is steep and it trips quickly.
+#define CHARGE_STALL_DROP_MV    40          // below the running peak = losing charge
+#define CHARGE_STALL_CONFIRM_MS 300000UL    // 5 min under that bar before believing it
+#define CHARGE_STALL_RISE_MV    40          // rise above the stall low-water mark = charger is back
+// Terminal protection floor. Below this, with no charger present, stop drawing
+// power at all rather than run the pack down to damage.
+#define CHARGE_MODE_DEAD_MV     3250
+// Below this the reading is the battery ADC failing, not a flat cell: a
+// connected single LiPo never reads this low (its protection IC cuts off around
+// 2.5-3.0V), whereas a failed adc_oneshot init returns a flat 0. The two must
+// be handled differently — see the ADC health block in run_charge_mode.
+#define BATT_ADC_MIN_PLAUSIBLE_MV 100
 #define CHARGE_MODE_MAGIC     0x50C0FFEEUL  // "enter charge mode on next boot" sentinel
 // RTC_NOINIT, not RTC_DATA: an initialized RTC_DATA var gets reloaded from the
 // app image on a normal reboot, so the request was being wiped by the very
@@ -197,7 +251,7 @@ struct MRow { int type; int idx; const char* text; };
 static const MRow MENU_ROWS[] = {
     {0, -1, "SCREENS"},
     {1,  0, "Scanner"},
-    {1,  1, "Signal"},
+    {1,  1, "Target"},
     {1,  2, "Detections"},
     {1,  3, "GPS"},
     {1,  4, "Stats"},
@@ -240,6 +294,13 @@ static int  menu_selected = 0;  // bridged into handle_menu_select()
 
 // ── Fullscreen menu state ──
 static bool menu_open = false;
+// Two-press guard on "CLEAR STATS" — the one irreversible menu action (it wipes
+// session AND lifetime counters, then persists, so there is nothing to undo).
+// Mirrors the hist_delete_confirming idiom used for single-capture deletion.
+// Armed by the first ENTER, fired by the second. Disarmed by moving the
+// selection, choosing any other item, or closing the menu, so a stale armed
+// flag can never fire later by accident.
+static bool stats_clear_confirming = false;
 static unsigned long menu_open_ms = 0;
 static int   menu_scroll_offset = 0;
 static float menu_scroll_y_f    = 0.0f;
@@ -263,7 +324,7 @@ struct MenuSection {
 
 static const MenuItem nav_items[] = {
     {"Scanner",          false, false, 0},
-    {"Signal",           false, false, 1},
+    {"Target",           false, false, 1},
     {"Detections",       false, false, 2},
     {"GPS Status",       false, false, 3},
     {"Device Stats",     false, false, 4},
@@ -496,7 +557,11 @@ static const int UI_PAD_LG  = 18;
 // Content area starts at this Y on every screen. Header = 0..CONTENT_Y-1.
 static const int CONTENT_Y  = 20;
 static const int SPR_H      = DISP_H - CONTENT_Y;  // 115 — content-only sprite height
-static const int TEXT_LEFT   = 4;   // left text margin — aligns header + viz titles + pills
+// Left text margin — aligns header + viz titles + pills, and (via TL) the whole
+// target screen. Raised 4 -> 8: at 4px the text visually touched the bezel.
+// Also widens the right margin wherever a right-aligned element is placed at
+// DISP_W - TEXT_LEFT (e.g. the target screen's status badge).
+static const int TEXT_LEFT   = 8;
 
 // ui_ease — the single curve we use for every UI animation
 // (ease_out_quad). Decelerating motion: fast start, soft landing.
@@ -662,10 +727,12 @@ static inline unsigned long current_dedup_window_ms() {
 #define SD_SPI_MOSI_PIN 14
 #define SD_CS_PIN       12
 
-// Version strings — update BOTH when bumping.
-// Also update: CHANGELOG.md, README.md badge
-#define VERSION_STRING "PLUME v1.0-beta"
-#define VERSION_SHORT  "v1.0b"
+// Version strings — update BOTH when bumping. Everything in the sketch that
+// shows a version derives from these (stats card, boot screen, export page
+// badge and footer), so no other source line needs touching.
+// Also update: CHANGELOG.md, README.md footer, and the file header above.
+#define VERSION_STRING "PLUME v1.1"
+#define VERSION_SHORT  "v1.1"
 
 // Set to 1 to enable the 'x' key simulation trigger (development only).
 // MUST be 0 for release builds — simulation creates permanent fake
@@ -687,6 +754,25 @@ static inline unsigned long current_dedup_window_ms() {
 
 // Screen count used by draw_header_lcd() and transition_screen().
 #define NUM_SCREENS 5
+
+// Screen 1 (TARGET) is deliberately OUT of the carousel. It is only meaningful
+// once something is selected to track, so cycling onto it just showed an empty
+// screen. It is now reached from the feed ([f] then [t], which jumps straight
+// there) or from the menu — never by cycling. It keeps index 1 so screen_names,
+// the menu's nav indices and any persisted current_screen all stay valid; only
+// the rotation skips it.
+#define SCREEN_TARGET 1
+static inline bool screen_in_carousel(int s) { return s != SCREEN_TARGET; }
+// Next/previous carousel screen, skipping any excluded index. The loop bound
+// guarantees termination even if every screen were somehow excluded.
+static inline int screen_step(int from, int dir) {
+    int n = from;
+    for (int i = 0; i < NUM_SCREENS; i++) {
+        n = (n + dir + NUM_SCREENS) % NUM_SCREENS;
+        if (screen_in_carousel(n)) return n;
+    }
+    return from;
+}
 
 // ============================================================================
 // GLOBALS & STRUCTS
@@ -1161,8 +1247,12 @@ static uint8_t       scanner_flash_proto = 0;  // 0=WiFi 1=BLE — protocol for 
 
 // Cycleable visualization in the scanner's bottom-left panel. 'v' key
 // advances through the modes; the renderer dispatches on this value.
-static int       scanner_viz_mode  = 0;   // 0=SCAN 1=SPECTRUM 2=TIMELINE
+static int       scanner_viz_mode  = 0;   // 0=SCAN 1=SPECTRUM (2=TIMELINE if enabled)
+#if ENABLE_TIMELINE_VIZ
 static const int SCANNER_VIZ_COUNT = 3;
+#else
+static const int SCANNER_VIZ_COUNT = 2;
+#endif
 
 // Per-channel packet counter used by the SPECTRUM viz. Counts are
 // incremented in wifi_sniffer_packet_handler() (single 32-bit store on
@@ -1192,6 +1282,7 @@ static unsigned long     scan_line_last_frame = 0;
 static float             spectrum_ble_blend = 0.0f;
 
 // ── Layered timeline state ─────────────────────────────────────────
+#if ENABLE_TIMELINE_VIZ
 #define TIMELINE_BIN_COUNT    50
 #define TIMELINE_WINDOW_MS    (5UL * 60UL * 1000UL)
 #define TIMELINE_BIN_MS       (TIMELINE_WINDOW_MS / TIMELINE_BIN_COUNT)
@@ -1215,6 +1306,7 @@ static unsigned long tl_last_bin_ms   = 0;
 static unsigned long tl_last_frame_ms = 0;
 static bool          tl_initialized   = false;
 static float         tl_flock_fade[TIMELINE_BIN_COUNT]  = {};
+#endif  // ENABLE_TIMELINE_VIZ
 
 
 // Feed slide-in animation — when scan_local_head changes, all rows
@@ -1630,6 +1722,57 @@ static int32_t charge_mode_read_mv() {
     return sum / N;
 }
 
+// Terminal battery protection for Charge Mode. Reached only when the not-
+// charging watch has confirmed no charger AND the pack has fallen to
+// CHARGE_MODE_DEAD_MV: there is nothing coming in and nothing left to spend, so
+// stop drawing power entirely. Deep sleep is ~20uA against the ~20mA the
+// screen-off watch loop still costs, and — unlike the brownout it would
+// otherwise end in — waking from deep sleep is NOT a reset reason the boot gate
+// re-enters Charge Mode on, which is what breaks the drain/reboot cycle.
+//
+// M5.Power.deepSleep() owns the panel shutdown (Display.sleep() +
+// waitDisplay()); the Cardputer sets no _wakeupPin, so passing touch_wakeup
+// false leaves it with no wake source of its own. We add one: the ADV
+// keyboard's TCA8418 interrupt line (GPIO 11, an RTC-capable pad), so a
+// keypress brings the device back. It is ACTIVE LOW, so arm it only when it is
+// currently idle-high — arming it over a pending event would wake instantly and
+// spin. If it is low, or on the regular Cardputer (GPIO-matrix keyboard, no INT
+// line), sleep with no wake source; the reset button still works.
+static void charge_mode_sleep_forever() {
+    auto& lcd = M5Cardputer.Display;
+    const uint16_t COL_BG = lgfx::color565(0, 0, 0);
+
+    lcd.wakeup();
+    lcd.setBrightness(20);
+    lcd.fillScreen(COL_BG);
+    lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(lgfx::color565(230, 170, 40), COL_BG);
+    lcd.setTextSize(2);
+    lcd.drawString("BATTERY SAVER", DISP_W / 2, DISP_H / 2 - 12);
+    lcd.setTextSize(1);
+    lcd.setTextColor(lgfx::color565(255, 255, 255), COL_BG);
+    lcd.drawString("charge, then press reset", DISP_W / 2, DISP_H / 2 + 16);
+    lcd.setTextDatum(TL_DATUM);
+    Serial.println("[CHARGE] battery protection -> deep sleep");
+    Serial.flush();
+
+    // Hold the notice long enough to be read, and drain any pending keyboard
+    // events so the INT line settles high before we sample it. Keep feeding the
+    // WDT: this task is still subscribed until the delete below.
+    for (int i = 0; i < 24; i++) { esp_task_wdt_reset(); M5Cardputer.update(); delay(250); }
+
+    lcd.setBrightness(0);
+    esp_task_wdt_delete(NULL);
+
+    // TCA8418 interrupt pin — DEFAULT_TCA8418_INT_PIN in M5Cardputer's
+    // TCA8418KeyboardReader, which is constructed with the default (-1 -> 11).
+    const gpio_num_t KB_INT_PIN = GPIO_NUM_11;
+    if (plume_is_adv && digitalRead(KB_INT_PIN) == HIGH) {
+        esp_sleep_enable_ext0_wakeup(KB_INT_PIN, 0);   // 0 = wake on active-low
+    }
+    M5Cardputer.Power.deepSleep(0, false);   // never returns
+}
+
 // Minimal charging screen + hold loop. Self-contained (hardcoded colors, direct
 // LCD) because it runs during early boot before the runtime palette and the
 // draw sprite exist. Returns when the user presses a key ("start now") or the
@@ -1694,9 +1837,6 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
     uint32_t exit_stable_since = 0;   // 0 = not currently above EXIT threshold
     bool     key_armed        = false;  // require one release before input acts, so the
                                         // 'c' that launched us can't fire instantly.
-    int      press_frames     = 0;      // consecutive frames with a key down: early-boot
-                                        // matrix scans can report 1-frame phantom presses,
-                                        // which must not "start the app" out of charge mode.
 
     // ── Charge-progress tracking ─────────────────────────────────────────────
     // The definitive "is it actually charging?" signal. On this hardware the cell
@@ -1741,9 +1881,19 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
     bool     chrome_stale = true;               // full repaint on entry / safe flip
     int32_t  drawn_mv     = -1;                 // mv the value strips show (-1 = stale)
     int      shown_pct    = -1;                 // ripple-guarded hero percent (-1 = unset)
-    int32_t  last_raw     = -1;                 // I2C wedge detector (see sample block)
-    int      flat_raws    = 0;
+    int32_t  last_raw     = -1;                 // ADC health checks (see sample block)
+    int      flat_raws    = 0;                  // consecutive bit-identical reads
+    int      bad_raws     = 0;                  // consecutive implausible reads
     int      gps_renap    = 0;                  // re-issue GPS standby (see sample block)
+
+    // ── Not-charging watch state (see CHARGE_STALL_* above) ──────────────────
+    // stalled == false: normal charge readout. stalled == true: panel powered
+    // down and sampling slowed, waiting for the charger to come back or for the
+    // pack to reach the protection floor.
+    int32_t  peak_mv      = mv;    // highest smoothed reading seen while charging
+    uint32_t stall_since  = 0;     // 0 = not currently below the stall bar
+    bool     stalled      = false;
+    int32_t  stall_low_mv = 0;     // low-water mark while stalled (recovery reference)
 
     // Every dynamic element renders into its own small sprite and lands as ONE
     // blit, so the panel never shows a cleared-but-not-yet-redrawn state (the
@@ -1768,46 +1918,94 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
         uint32_t now = millis();
 
         bool pressed = M5Cardputer.Keyboard.isPressed();
-        if (!pressed) { key_armed = true; press_frames = 0; }
-        else if (key_armed && ++press_frames >= 2) {
-            // Real keypress (held >= 2 frames / ~60ms). Wait for release so
-            // the keystroke (e.g. 'b') can't leak into the app's keyboard
-            // handler and cycle brightness the instant we return.
-            while (M5Cardputer.Keyboard.isPressed()) { M5Cardputer.update(); delay(10); }
+        if (!pressed) { key_armed = true; }
+        else if (key_armed) {
+            // ANY observed press exits — there is deliberately no multi-frame
+            // debounce. On the ADV the key list is built from TCA8418 FIFO
+            // events (debounced in the controller), not from a matrix rescan,
+            // and update() drains exactly ONE event per call. A quick tap
+            // therefore shows up as "pressed" on one frame and "released" on
+            // the next, so the old >=2-frame rule silently ate short taps and
+            // forced the user to hold a key — which reads as a dead screen.
+            //
+            // Wait for release so the keystroke (e.g. 'b') can't leak into the
+            // app's keyboard handler and cycle brightness the instant we
+            // return — but time-box it and keep feeding the WDT. That same
+            // event model means a LOST release event latches the key down
+            // forever (no rescan ever clears it), and an unbounded wait here
+            // would spin past the 30s task WDT into a panic reboot: a frozen
+            // charge screen of our own making. A leaked keystroke is the far
+            // cheaper failure.
+            const uint32_t RELEASE_WAIT_MS = 3000;
+            uint32_t rel_start = millis();
+            while (M5Cardputer.Keyboard.isPressed()
+                   && (millis() - rel_start) < RELEASE_WAIT_MS) {
+                esp_task_wdt_reset();
+                M5Cardputer.update();
+                delay(10);
+            }
             // Do NOT touch brightness here: charge mode holds one fixed level
             // and the app's boot owns brightness afterward (the boot probe
-            // also wakes the GPS on this path).
+            // also wakes the GPS on this path). The panel may be asleep if the
+            // not-charging watch powered it down, and the app draws into it
+            // immediately on return.
+            lcd.wakeup();
             esp_task_wdt_delete(NULL);
             return;
         }
 
-        // Periodic cell sample + resume decision (NOT every frame).
-        if (now - last_sample_ms >= SAMPLE_MS) {
+        // Periodic cell sample + resume decision (NOT every frame). Once
+        // stalled there is nothing on screen to keep current, so sample lazily.
+        if (now - last_sample_ms >= (stalled ? 5000UL : SAMPLE_MS)) {
             last_sample_ms = now;
             int32_t raw = charge_mode_read_mv();
 
-            // I2C wedge detector. On the ADV the keyboard AND the PMIC battery
-            // reads share one I2C bus; a bus lockup (glitch mid-transaction)
-            // leaves this loop alive — petting the task WDT — but deaf (keys
-            // dead) and blind (reading frozen). That is the "frozen charge
-            // screen" no watchdog catches. A healthy 16-sample ADC mean always
-            // wobbles within a few minutes; a bit-identical raw for 180
-            // consecutive 1s samples, or a nonsense (<=100mV) read, means the
-            // bus is stuck. Reboot: full re-init clears the bus and the boot
-            // gate drops straight back into Charge Mode.
             // Re-issue GPS standby every ~50s: the $PCAS12 window unit is
             // ambiguous across CASIC firmwares (ms vs s); if it auto-wakes,
             // this puts it back to sleep before it burns meaningful charge.
             if (++gps_renap >= 50) { gps_renap = 0; gps_blind_cmd(true); }
 
-            if      (raw <= 100)      flat_raws += 30;   // garbage read: fail fast
-            else if (raw == last_raw) flat_raws++;
-            else                      flat_raws = 0;
-            last_raw = raw;
-            if (flat_raws >= 180) {
-                Serial.println("[CHARGE] peripheral wedge suspected (flat reads) -> reboot");
-                delay(50);
-                esp_restart();
+            // ── Battery ADC health ───────────────────────────────────────────
+            // Two distinct failures, two distinct responses.
+            //
+            // (1) IMPLAUSIBLE read. The ADC oneshot unit failed to initialize,
+            //     so _getBatteryAdcRaw() returns 0 (M5Unified Power_Class.cpp).
+            //     A reboot cannot fix that, and it is actively harmful: the boot
+            //     gate reads 0mV as "empty cell", gates straight back into
+            //     Charge Mode, and we land here again ~6s later — forever, which
+            //     presents as a bricked device. Charge Mode exists to make a
+            //     VOLTAGE decision; with no voltage it protects nothing and only
+            //     traps the user. Bail out and let the app boot.
+            // (2) FROZEN read. A healthy 16-sample mean of a ±15mV-ripple ADC is
+            //     never bit-identical for 180 consecutive samples, so that means
+            //     the ADC has genuinely stopped converting. A reboot CAN clear
+            //     that, and the boot gate re-enters Charge Mode afterward.
+            //
+            // NOTE: neither check can see an I2C or KEYBOARD failure, despite
+            // what this block used to claim. The battery read is ADC1_GPIO10
+            // with no I2C involved (pmic_adc); the keyboard's TCA8418 is the only
+            // device on the bus. A wedged keyboard leaves these reads perfectly
+            // healthy — keyboard liveness needs its own watch, in the app, where
+            // a dead keyboard actually strands the user (Charge Mode's own exits
+            // are voltage-driven and survive it).
+            if (raw <= BATT_ADC_MIN_PLAUSIBLE_MV) {
+                if (++bad_raws >= 6) {
+                    Serial.printf("[CHARGE] battery ADC implausible (%dmV) -> resuming app\n",
+                                  (int)raw);
+                    lcd.wakeup();
+                    esp_task_wdt_delete(NULL);
+                    return;
+                }
+            } else {
+                bad_raws = 0;
+                if (raw == last_raw) flat_raws++;
+                else                 flat_raws = 0;
+                last_raw = raw;
+                if (flat_raws >= 180) {
+                    Serial.println("[CHARGE] battery ADC frozen (180 identical reads) -> reboot");
+                    delay(50);
+                    esp_restart();
+                }
             }
 
             // 0.08 (~12s TC at 1s samples, was 0.2/~5s): observed ±15mV ripple
@@ -1828,11 +2026,82 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
             }
 
             // Serial trace mirrors the on-screen readout (handy over USB).
-            Serial.printf("[CHARGE] t=%lus  %dmV  (%+dmV)  %s%.1f mV/min\n",
+            Serial.printf("[CHARGE] t=%lus  %dmV  (%+dmV)  %s%.1f mV/min%s\n",
                           (unsigned long)(elapsed_ms / 1000), (int)mv,
                           (int)(mv - start_mv),
                           rate_valid ? "avg " : "settling ",
-                          rate_valid ? rate_mv_per_min : 0.0f);
+                          rate_valid ? rate_mv_per_min : 0.0f,
+                          stalled ? "  [STALLED]" : "");
+
+            // ── Not-charging watch ───────────────────────────────────────────
+            // The cell falling away from its own peak is the only "no charger"
+            // signal this board offers (see CHARGE_STALL_* above).
+            if (stalled) {
+                if (mv < stall_low_mv) stall_low_mv = mv;   // recovery reference
+                if (mv >= stall_low_mv + CHARGE_STALL_RISE_MV) {
+                    // Climbing again — the charger is back. Restore the readout.
+                    stalled      = false;
+                    stall_since  = 0;
+                    peak_mv      = mv;
+                    chrome_stale = true;   // full repaint; the panel was asleep
+                    drawn_mv     = -1;
+                    shown_pct    = -1;
+                    Serial.printf("[CHARGE] charging resumed at %dmV -> screen on\n", (int)mv);
+                    lcd.wakeup();
+                    lcd.setBrightness(20);
+                } else if (mv <= CHARGE_MODE_DEAD_MV) {
+                    charge_mode_sleep_forever();   // never returns
+                }
+            } else if (mv > peak_mv) {
+                peak_mv     = mv;
+                stall_since = 0;
+            } else if (mv <= peak_mv - CHARGE_STALL_DROP_MV) {
+                if (stall_since == 0) stall_since = now;
+                else if (now - stall_since >= CHARGE_STALL_CONFIRM_MS) {
+                    // Confirmed: we are DISCHARGING on the charge screen. Say
+                    // so, then cut the panel — the backlight is the one load
+                    // still under our control, and holding it lit only hastens
+                    // the brownout that would reboot us straight back here.
+                    stalled      = true;
+                    stall_low_mv = mv;
+                    Serial.printf("[CHARGE] NOT CHARGING: %dmV, %dmV below peak %dmV -> screen off\n",
+                                  (int)mv, (int)(peak_mv - mv), (int)peak_mv);
+
+                    lcd.fillScreen(COL_BG);
+                    lcd.setTextDatum(TL_DATUM);
+                    lcd.setTextColor(COL_LOW, COL_BG);
+                    lcd.setTextSize(1);
+                    {
+                        int tx = PAD;
+                        for (const char* p = "NOT CHARGING"; *p; p++) {
+                            char ch[2] = {*p, '\0'};
+                            lcd.drawString(ch, tx, PAD);
+                            tx += 6 + 2;
+                        }
+                    }
+                    lcd.setTextColor(COL_TEXT, COL_BG);
+                    lcd.setTextSize(2);
+                    lcd.drawString("check cable", PAD, 46);
+                    lcd.setTextSize(1);
+                    lcd.drawString("screen off to save power", PAD, 76);
+                    lcd.setTextDatum(BL_DATUM);
+                    lcd.drawString("press any key to start", PAD, DISP_H - PAD + 2);
+                    lcd.setTextDatum(TL_DATUM);
+
+                    // Hold it on screen long enough to be read, feeding the WDT.
+                    // Deliberately NO M5Cardputer.update() in here: update()
+                    // drains the TCA8418 FIFO, and a tap landing in this window
+                    // would have its press and release both consumed before the
+                    // key handler at the top of the loop ever saw it. Leaving
+                    // the events queued means the press is still waiting when
+                    // we get back there.
+                    for (int i = 0; i < 24; i++) { esp_task_wdt_reset(); delay(250); }
+                    lcd.setBrightness(0);
+                    lcd.sleep();
+                }
+            } else {
+                stall_since = 0;   // back inside the noise band of the peak
+            }
 
             // Auto-resume once the SMOOTHED cell voltage HOLDS above the resume
             // threshold for a sustained window, so ripple can't bounce us into a
@@ -1842,6 +2111,7 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
             if (mv >= resume_mv) {
                 if (exit_stable_since == 0)                    exit_stable_since = now;
                 else if (now - exit_stable_since >= 4000) {
+                    lcd.wakeup();   // no-op unless the stall watch slept the panel
                     esp_task_wdt_delete(NULL);
                     return;   // app boot owns brightness; charge mode never changes it
                 }
@@ -1849,6 +2119,11 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
                 exit_stable_since = 0;
             }
         }
+
+        // Stalled: the panel is powered down, so there is nothing to render and
+        // no reason to spin at UI cadence. Poll slowly — the key handler above
+        // still runs every pass, and a press exits immediately.
+        if (stalled) { delay(500); continue; }
 
         // ── Rendering ────────────────────────────────────────────────────────
         // Chrome (title/footer) paints on entry and repaints only when the
@@ -2042,7 +2317,15 @@ struct OuiEntry { const char* prefix; uint8_t tier; };
 // ============================================================================
 static const char* wifi_ssid_patterns[] = {
     "FS Ext Battery", "Penguin", "Pigvision", "FlockOS",
-    "flocksafety", "OFS_IoT", "PFS_"
+    "flocksafety", "OFS_IoT", "PFS_",
+    // Bare "flock" — matched case-insensitively as a SUBSTRING, so it covers
+    // names the more specific patterns miss (e.g. "Flock-Cam-7", "FlockLTE").
+    // is_flock_ssid_format() only accepts a "Flock-" prefix with a 2..12 digit
+    // HEX suffix, so non-hex variants previously fell through everything.
+    // Deliberately low-yield by design: an SSID match alone scores SCORE_WEAK
+    // (25), well under CONFIDENCE_ALARM_THRESHOLD, so a coincidental hit on a
+    // home network cannot raise an alarm on its own.
+    "flock"
 };
 static const int NUM_SSID_PATTERNS = sizeof(wifi_ssid_patterns) / sizeof(wifi_ssid_patterns[0]);
 
@@ -2071,6 +2354,15 @@ static const OuiEntry mac_prefixes[] = {
     {"e8:d0:fc", OUI_GENERIC}, {"e0:4f:43", OUI_GENERIC}, {"b8:1e:a4", OUI_GENERIC}, {"70:08:94", OUI_GENERIC},
     {"3c:71:bf", OUI_GENERIC}, {"58:00:e3", OUI_GENERIC}, {"5c:93:a2", OUI_GENERIC}, {"64:6e:69", OUI_GENERIC},
     {"48:27:ea", OUI_GENERIC}, {"82:6b:f2", OUI_GENERIC},
+    // cc:cc:cc — from NSM-Barii/flock-back, listed there under "FS Ext Battery
+    // devices". UNVALIDATED: no capture backs it in that repo, and the pattern
+    // reads like a default/placeholder MAC rather than a real vendor allocation,
+    // so it is the most false-positive-prone entry in this table. Tier 2 only.
+    // Contained by design — Tier 2 + wildcard probe caps at SCORE_STRONG (60),
+    // +10 RSSI bonus = 70, still under CONFIDENCE_ALARM_THRESHOLD (75): it
+    // cannot alarm without a second independent signal. Remove if it proves
+    // noisy in the feed.
+    {"cc:cc:cc", OUI_GENERIC},
     // LiteOn Technology Corporation — WCBN3510A WiFi+BT module
     // Confirmed in Falcon, Sparrow, Falcon Flex, Falcon LR
     // d0:39:57 via NitekryDPaul, e0:0a:f6 via IEEE lookup May 2026
@@ -2581,7 +2873,7 @@ background:rgba(255,181,71,.12);margin-bottom:14px}
 </style></head><body><div class="pg">
 <div class="hs fi2"><span class="ht">Plume</span>
 <div style="display:flex;gap:6px;align-items:center">
-<span class="pl po">v1.0b</span><span class="pl ph">EXP</span></div></div>
+<span class="pl po">)rawhtml" VERSION_SHORT R"rawhtml(</span><span class="pl ph">EXP</span></div></div>
 <div class="fi2" style="margin-bottom:18px"><div class="sb">
 <span class="dt"></span>EXPORT ACTIVE</div></div>
 <div class="ws fi2">
@@ -5057,7 +5349,11 @@ void process_wifi_event_queue() {
         // does NOT add confidence (avoids alarming on phones); it only emits a
         // serial candidate line so the operator can curate the OUI list later.
         // Known-OUI devices are already scored above; this only adds logging.
-        if (local.is_probe_req && strlen(local.ssid) == 0) {
+        // Skip randomized (locally-administered) MACs entirely: their OUI is
+        // synthetic and worthless for curation, a real Flock unit advertises its
+        // true OUI, and privacy-scanning phones would otherwise both flood this
+        // log and evict genuine candidates from the 32-slot tracker.
+        if (local.is_probe_req && strlen(local.ssid) == 0 && !(local.mac[0] & 0x02)) {
             bool wc_confirmed = wildcard_probe_observe(local.mac, local.channel);
             if (wc_confirmed && mac_score == 0) {
                 Serial.printf("WILDCARD-CANDIDATE OUI %02x:%02x:%02x RSSI %d\n",
@@ -5788,7 +6084,7 @@ static void drawPill_lcd(int x, int y, const char* text, uint16_t accent_col,
 void draw_header_lcd(int screen_num, const char* name_override) {
     auto& lcd = M5Cardputer.Display;
     static const char* screen_names[NUM_SCREENS] = {
-        "SCANNER", "SIGNAL", "DETECTIONS", "GPS", "STATS"
+        "SCANNER", "TARGET", "DETECTIONS", "GPS", "STATS"
     };
     if (screen_num < 0 || screen_num >= NUM_SCREENS) screen_num = 0;
 
@@ -5810,22 +6106,27 @@ void draw_header_lcd(int screen_num, const char* name_override) {
     give_data_mutex();
     bool muted_now = is_muted;
 
-    int icon_right = DISP_W - 4;
+    // Right margin for the status pill row. Was 4px, which ran the rightmost
+    // pill into the bezel; TEXT_LEFT keeps it symmetric with the title margin.
+    int icon_right = DISP_W - TEXT_LEFT;
     int icon_y = 4;
 
     // Mode badges
     {
+        // A (ambient), N (night) and S (stealth) were dropped: each announces a
+        // state that is already unmistakable on screen — ambient and stealth
+        // visibly dim the backlight, night swaps the entire palette — so the
+        // badge was spending scarce header width to say what the display had
+        // already said. What remains is state you cannot otherwise see.
+        // Nothing here uses DIM_COLOR any more; at TS_MICRO it was too faint.
         struct ModeBadge { bool active; const char* letter; uint16_t color; };
-        ModeBadge badges[7] = {
-            { ambient_mode,      "A", DIM_COLOR },
-            { night_mode,        "N", HEADER_COLOR },
-            { stealth_mode,      "S", DIM_COLOR },
+        ModeBadge badges[4] = {
             { signal_active,    "L", CAUTION_COLOR },
             { low_power_mode,    "P", ACCENT_COLOR },
             { turbo_mode_active, "T", CAUTION_COLOR },
             { c5_is_present(),   "5G", HEADER_COLOR },
         };
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 4; i++) {
             if (!badges[i].active) continue;
             int pw = (int)strlen(badges[i].letter) * ts_char_w(TS_MICRO) + 6;
             drawPill_lcd(icon_right - pw, icon_y, badges[i].letter, badges[i].color);
@@ -5835,7 +6136,7 @@ void draw_header_lcd(int screen_num, const char* name_override) {
 
     // Muted indicator
     if (muted_now) {
-        drawPill_lcd(icon_right - 13, icon_y, "M", DIM_COLOR);
+        drawPill_lcd(icon_right - 13, icon_y, "M", TEXT_COLOR);
         icon_right -= 15;
     }
 
@@ -5863,16 +6164,18 @@ void draw_header_lcd(int screen_num, const char* name_override) {
 
     // WiFi + BLE session count pills
     {
+        // Colour-coded by protocol instead of DIM_COLOR — these two counts are
+        // the most-glanced values in the header and were the least legible.
         char b_str[8];
         snprintf(b_str, sizeof(b_str), "B%ld", pill_ble);
         int bw = (int)strlen(b_str) * ts_char_w(TS_MICRO) + 6;
-        drawPill_lcd(icon_right - bw, icon_y, b_str, DIM_COLOR);
+        drawPill_lcd(icon_right - bw, icon_y, b_str, PURPLE_COLOR);
         icon_right -= bw + 2;
 
         char w_str[8];
         snprintf(w_str, sizeof(w_str), "W%ld", pill_wifi);
         int ww = (int)strlen(w_str) * ts_char_w(TS_MICRO) + 6;
-        drawPill_lcd(icon_right - ww, icon_y, w_str, DIM_COLOR);
+        drawPill_lcd(icon_right - ww, icon_y, w_str, TEAL_COLOR);
         icon_right -= ww + 2;
     }
 
@@ -6786,6 +7089,15 @@ static void enter_charge_mode_reboot() {
 }
 
 void handle_menu_select() {
+    // Consume the clear-stats arm on EVERY selection, so choosing any other
+    // item disarms it. Only case 11 reads it back.
+    const bool clear_stats_armed = stats_clear_confirming;
+    stats_clear_confirming = false;
+
+    // Selecting an item closes the menu — unchanged behaviour, just moved here
+    // from the ENTER handler so the clear-stats confirm can re-open it below.
+    menu_open = false;
+
     switch (menu_selected) {
         case 0: case 1: case 2: case 3: case 4: {
             if (export_mode_active) break;
@@ -6864,7 +7176,15 @@ void handle_menu_select() {
             screen_dirty = true;
             break;
         case 11: {
-            // Clear all stats — session and lifetime
+            // Clear all stats — session and lifetime. Irreversible, so require
+            // a second ENTER. The first press only arms and warns.
+            if (!clear_stats_armed) {
+                stats_clear_confirming = true;
+                menu_open = true;   // hold the menu open so both presses are adjacent
+                set_toast_direct("CLEAR ALL STATS? ENT AGAIN", TOAST_WARNING, false);
+                screen_dirty = true;
+                break;
+            }
             flush_pending_deletes();
             xSemaphoreTakeRecursive(dataMutex, portMAX_DELAY);
             session_wifi = 0; session_ble = 0;
@@ -6912,11 +7232,13 @@ static const int VIZ_W         = DIVIDER_X - VIZ_X - DIVIDER_GAP;    // 132
 static const int VIZ_RIGHT     = VIZ_X + VIZ_W;                       // 138
 static const int FEED_X        = DIVIDER_X + 1 + DIVIDER_GAP;         // 143 — 1px line + gutter
 static const int FEED_RIGHT    = DISP_W - UI_PAD_SM;                  // 234 — right screen margin
-static const int LABEL_ROW_H   = 16;                                   // fits TS_BODY + vertical padding
-static const int LABEL_TEXT_Y  = UI_PAD_XS * 2;                        // 4 — text cursor y (sprite-space)
-static const int LABEL_MICRO_Y = LABEL_TEXT_Y + UI_PAD_XS;            // 6 — TS_MICRO baseline-aligned
-static const int VIZ_Y         = LABEL_ROW_H;                          // 16 — viz/feed content top (sprite-space)
-static const int VIZ_H         = SPR_H - VIZ_Y;                        // 99
+// The "SCAN"/"LINE" and "FEED" label row was removed: the titles were static
+// text that never changed and the panels below them are self-evident, so the
+// 16px it occupied is given back to the two content panes instead. VIZ_Y = 0
+// makes both the viz and the feed 16px taller (99 -> 115), and max_feed_rows
+// is computed from the available height, so the feed simply gains rows.
+static const int VIZ_Y         = 0;                                    // viz/feed content top (sprite-space)
+static const int VIZ_H         = SPR_H - VIZ_Y;                        // 115
 static const int VIZ_BOTTOM    = VIZ_Y + VIZ_H;                        // 115 (== SPR_H)
 static const int FEED_FIRST_Y  = VIZ_Y;                                // 16 — feed rows start here
 
@@ -6997,6 +7319,7 @@ static inline float fast_atan2f(float y, float x) {
 
 
 // ── Timeline bin management ───────────────────────────────────────────────
+#if ENABLE_TIMELINE_VIZ
 static void timeline_shift_bins(unsigned long frame_ms) {
     for (int i = 0; i < TIMELINE_BIN_COUNT - 1; i++) {
         tl_bins[i]       = tl_bins[i + 1];
@@ -7067,6 +7390,7 @@ static void timeline_init(unsigned long frame_ms) {
     tl_last_bin_ms = frame_ms;
     tl_initialized = true;
 }
+#endif  // ENABLE_TIMELINE_VIZ
 
 // ── Export mode info display — replaces scanner content while active ──
 static void draw_export_info() {
@@ -7185,6 +7509,7 @@ void draw_scanner_screen() {
 
     unsigned long frame_ms = millis();
 
+#if ENABLE_TIMELINE_VIZ
     // Keep timeline bins populated regardless of which viz is active
     // so the timeline has history when the user first visits it.
     if (!tl_initialized) {
@@ -7193,6 +7518,7 @@ void draw_scanner_screen() {
     if (frame_ms - tl_last_bin_ms >= TIMELINE_BIN_MS) {
         timeline_shift_bins(frame_ms);
     }
+#endif
 
     // Step 1: clear
     spr.fillSprite(BG_COLOR);
@@ -7200,35 +7526,9 @@ void draw_scanner_screen() {
     // Step 2: vertical divider
     spr.drawFastVLine(DIVIDER_X, 0, SPR_H, CARD_BORDER);
 
-    // Step 3: shared label row — viz title (left) | N/4 right-aligned | FEED (right)
-    {
-        static const char* viz_titles[] = {"SCAN", "LINE", "TIME"};
-        const char* vt = viz_titles[scanner_viz_mode];
-
-        // Viz title — aligned with header text
-        spr.setTextColor(HEADER_COLOR, BG_COLOR);
-        spr.setTextSize(TS_BODY);
-        spr.setCursor(TEXT_LEFT, LABEL_TEXT_Y);
-        kprint(spr, vt);
-
-        // N/4 indicator — right-aligned within viz panel
-        {
-            char ind_str[6];
-            snprintf(ind_str, sizeof(ind_str), "%d/%d",
-                     scanner_viz_mode + 1, SCANNER_VIZ_COUNT);
-            int ind_w = (int)strlen(ind_str) * ts_char_w(TS_MICRO);
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
-            spr.setTextSize(TS_MICRO);
-            spr.setCursor(VIZ_RIGHT - UI_PAD_SM - ind_w, LABEL_MICRO_Y);
-            spr.print(ind_str);
-        }
-
-        // FEED label — right column, aligned with content left edge
-        spr.setTextColor(HEADER_COLOR, BG_COLOR);
-        spr.setTextSize(TS_BODY);
-        spr.setCursor(FEED_X + DIVIDER_GAP + 1, LABEL_TEXT_Y);
-        kprint(spr, "FEED");
-    }
+    // Step 3: (removed) the viz/FEED label row — see VIZ_Y above. Both panes
+    // now start at y=0 and use the reclaimed 16px. Note this also drops the
+    // "N/M" viz-mode indicator; the active viz is identified by its own shape.
 
     // Step 4: viz panel
     spr.setClipRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H);
@@ -7249,6 +7549,7 @@ void draw_scanner_screen() {
         }
     }
 
+#if ENABLE_TIMELINE_VIZ
     // Keep timeline smooth data warm across all modes so TIME starts live.
     {
         float tdt = (tl_last_frame_ms == 0) ? 16.0f
@@ -7280,11 +7581,14 @@ void draw_scanner_screen() {
             }
         }
     }
+#endif  // ENABLE_TIMELINE_VIZ
 
     switch (scanner_viz_mode) {
         case 0: draw_scanner_viz_scan(frame_ms);         break;
         case 1: draw_scanner_viz_spectrum(frame_ms);     break;
+#if ENABLE_TIMELINE_VIZ
         case 2: draw_scanner_viz_timeline(frame_ms);     break;
+#endif
     }
     spr.clearClipRect();
 
@@ -8193,6 +8497,7 @@ static void draw_scanner_viz_spectrum(unsigned long frame_ms) {
 }
 
 // ── Viz mode 3: LAYERED TIMELINE ─────────────────────────────────────────
+#if ENABLE_TIMELINE_VIZ
 // Max interpolated points: 50 bins × 6 sub-steps + 1 = 295
 #define TL_INTERP_FACTOR  6
 #define TL_SMOOTH_MAX     ((TIMELINE_BIN_COUNT - 1) * TL_INTERP_FACTOR + 1)
@@ -8467,6 +8772,7 @@ static void draw_scanner_viz_timeline(unsigned long frame_ms) {
     #undef TMX
     #undef TMY
 }
+#endif  // ENABLE_TIMELINE_VIZ
 
 // ============================================================================
 // EXPANDED FEED OVERLAY — fullscreen activity feed view
@@ -9055,12 +9361,12 @@ void draw_signal_screen() {
 
     const int TL = TEXT_LEFT;
 
-    // ── Row 1: TARGET label (left) + status badge (right) ──
-    spr.setTextColor(HEADER_COLOR, BG_COLOR);
-    spr.setTextSize(TS_MICRO);
-    spr.setCursor(TL, UI_PAD_SM);
-    kprint(spr, "TARGET");
-
+    // ── Row 1: device name (left) + status badge (right) ──
+    // No "TARGET" label here: the screen header already says TARGET, so a second
+    // one was pure duplication. The content now starts with the device itself,
+    // sharing this row with the status badge — which means the name has to stop
+    // short of the badge rather than run underneath it.
+    int name_y;
     {
         bool is_flock = (strncmp(target_type, "FLOCK", 5) == 0
                       || strncmp(target_type, "RAVEN", 5) == 0);
@@ -9073,22 +9379,12 @@ void draw_signal_screen() {
         int bh = 17;
         int bx = DISP_W - TL - bw;
         int by = UI_PAD_XS;
-        uint16_t sfill = lerp_col16(BG_COLOR, badge_col, 0.22f);
-        spr.fillRoundRect(bx, by, bw, bh, 5, sfill);
-        spr.drawRoundRect(bx, by, bw, bh, 5, badge_col);
-        spr.setTextColor(badge_col, sfill);
-        spr.setTextSize(TS_MICRO);
-        spr.setCursor(bx + 6, by + 4);
-        kprint(spr, badge_text);
-    }
 
-    // ── Row 2: Target name ──
-    int name_y = UI_PAD_XS + 16 + UI_PAD_XS;  // 2px below badge bottom
-    {
+        name_y = by + 4;   // optical centre of TS_BODY against the 17px badge
         spr.setTextSize(TS_BODY);
         spr.setCursor(TL, name_y);
         if (!active) {
-            spr.setTextColor(DIM_COLOR, BG_COLOR);
+            spr.setTextColor(TEXT_COLOR, BG_COLOR);
             spr.print("No Target");
         } else {
             bool nok = target_name[0] != '\0'
@@ -9100,8 +9396,10 @@ void draw_signal_screen() {
             if (target_id > 0)
                 snprintf(id_buf, sizeof(id_buf), " (#%03d)", target_id);
             int id_w      = (int)strlen(id_buf) * ts_char_w(TS_BODY);
-            int avail_w   = DISP_W - TL * 2 - id_w;
-            int max_chars = avail_w / ts_char_w(TS_BODY);
+            // Bound by the badge's left edge, not the screen width.
+            int avail_w   = bx - TL - UI_PAD_SM - id_w;
+            int max_chars = (avail_w > 0) ? avail_w / ts_char_w(TS_BODY) : 0;
+            if (max_chars > 64) max_chars = 64;   // disp[] is 65 incl. NUL
             char disp[65];
             strncpy(disp, raw_name, max_chars);
             disp[max_chars] = '\0';
@@ -9112,6 +9410,15 @@ void draw_signal_screen() {
                 spr.print(id_buf);
             }
         }
+
+        // Badge painted last so it always sits above any name overflow.
+        uint16_t sfill = lerp_col16(BG_COLOR, badge_col, 0.22f);
+        spr.fillRoundRect(bx, by, bw, bh, 5, sfill);
+        spr.drawRoundRect(bx, by, bw, bh, 5, badge_col);
+        spr.setTextColor(badge_col, sfill);
+        spr.setTextSize(TS_MICRO);
+        spr.setCursor(bx + 6, by + 4);
+        kprint(spr, badge_text);
     }
 
     // ── No-target early exit ──
@@ -9132,7 +9439,7 @@ void draw_signal_screen() {
     spr.setTextColor(HEADER_COLOR, BG_COLOR);
     spr.setTextSize(TS_MICRO);
     spr.setCursor(TL, live_y);
-    kprint(spr, "LIVE SIGNAL");
+    kprint(spr, "LIVE SIGNAL", 2);   // match the label letter-spacing above
 
     // ── Row 4: dBm hero + trend indicator ──
     int hero_y = live_y + 10 + UI_PAD_XS;
@@ -10502,12 +10809,38 @@ static void c5_push_signatures() {
     Serial.printf("[C5] pushed signatures: OUI=%d SSID=%d\n", oui_sent, ssid_sent);
 }
 
+// Mirror this device's own LED state onto the C5 so the pair glows as one
+// instrument. The gating expression is lifted from LedTask deliberately — the
+// C5 must go dark in exactly the cases the Cardputer's LED does. Stealth is the
+// one that actually matters: a C5 breathing away on the Grove port after the
+// Cardputer went dark would defeat the whole point of stealth mode.
+// Sent only on change (the C5 latches the last value), and unknown tags are
+// ignored in both directions, so this needs no PROTOCOL_VERSION bump.
+static void c5_push_led_state(bool force) {
+    if (!c5_link_started) return;
+    static int last_on = -1, last_r = -1, last_g = -1, last_b = -1;
+
+    bool export_on = (export_mode_active || export_connecting);
+    bool on = !stealth_mode && !night_mode
+              && (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
+    int r = export_on ? 255 : (int)led_r;
+    int g = export_on ? 130 : (int)led_g;
+    int b = export_on ?   0 : (int)led_b;
+
+    if (!force && last_on == (int)on && last_r == r && last_g == g && last_b == b) return;
+    last_on = (int)on; last_r = r; last_g = g; last_b = b;
+    SerialC5.printf("L|%d|%d|%d|%d\n", on ? 1 : 0, r, g, b);
+}
+
 static void service_c5_link() {
     if (!c5_enabled || !c5_link_started) { c5_was_present_for_sync = false; return; }
     bool present = c5_is_present();
+    // Cheap change-detect every tick; the full push happens on link-up below.
+    c5_push_led_state(false);
     if (present && !c5_was_present_for_sync) {
         c5_push_signatures();
         c5_push_time();
+        c5_push_led_state(true);   // re-assert after a C5 reboot/reconnect
         c5_last_time_push_ms = millis();
     }
     c5_was_present_for_sync = present;
@@ -10687,6 +11020,16 @@ void setup() {
     // radio init on a cell that can't power it.
     {
         int32_t boot_mv   = charge_mode_read_mv();
+        // An implausible reading means the battery ADC failed to initialize, NOT
+        // an empty cell (see BATT_ADC_MIN_PLAUSIBLE_MV). Gating on it would send
+        // every boot into Charge Mode, which then has no voltage to decide with
+        // — a loop that presents as a bricked device. Skip the voltage gate and
+        // boot the app; an explicit 'c' request or a brownout still enters (and
+        // Charge Mode's own ADC health check bails straight back out).
+        bool    adc_ok    = (boot_mv > BATT_ADC_MIN_PLAUSIBLE_MV);
+        if (!adc_ok)
+            Serial.printf("[BOOT] battery ADC implausible (%dmV) - skipping voltage gate\n",
+                          (int)boot_mv);
         // Honor the 'c'-key request only after a software restart (esp_restart);
         // on power-on the NOINIT value is indeterminate. Consume it immediately
         // so a stale value can't re-trigger on a later boot.
@@ -10700,7 +11043,7 @@ void setup() {
         bool    brownout  = (esp_reset_reason() == ESP_RST_BROWNOUT);
         Serial.printf("[BOOT] battery=%dmV, charge_mode_request=%s, brownout=%s\n",
                       (int)boot_mv, requested ? "yes" : "no", brownout ? "yes" : "no");
-        if (requested || brownout || boot_mv < CHARGE_MODE_ENTER_MV) {
+        if (requested || brownout || (adc_ok && boot_mv < CHARGE_MODE_ENTER_MV)) {
             const char* why = requested ? "user request"
                             : brownout  ? "recovering from brownout"
                                         : "battery below entry floor";
@@ -11926,15 +12269,21 @@ static void handle_keyboard_input() {
             // ── Menu navigation — swallow all keys while menu is open ──
             if (menu_open) {
                 if (IS_KEY_UP(c)) {
+                    stats_clear_confirming = false;   // moving off the item disarms
                     menu_selected = menu_next_idx(menu_selected, -1);
                     menu_click();
                 } else if (IS_KEY_DOWN(c)) {
+                    stats_clear_confirming = false;
                     menu_selected = menu_next_idx(menu_selected, +1);
                     menu_click();
                 } else if (c == '\n' || c == '\r') {
-                    menu_open = false;
+                    // handle_menu_select() owns whether the menu closes. It still
+                    // closes for every action (so the toast and the effect are
+                    // visible), but the clear-stats confirm holds it open so the
+                    // two ENTER presses stay adjacent.
                     handle_menu_select();
                 } else if (c == 0x08 || c == 0x7F || c == 0x1B || c == 'm' || IS_KEY_LEFT(c)) {
+                    stats_clear_confirming = false;
                     menu_open = false;
                     screen_dirty = true;
                 }
@@ -11981,6 +12330,7 @@ static void handle_keyboard_input() {
             else if (c == 'm') {
                 if (!stealth_mode) {
                     menu_open = !menu_open;
+                    stats_clear_confirming = false;   // every open/close starts disarmed
                     if (menu_open) {
                         show_feed_expanded = false;
                         menu_open_ms = millis();
@@ -12075,9 +12425,9 @@ static void handle_keyboard_input() {
                     continue;
                 }
                 if (!stealth_mode && !screen_transitioned) {
-                    int prev = current_screen - 1;
-                    int d = (prev < 0) ? 1 : -1;
-                    if (prev < 0) prev = NUM_SCREENS - 1;
+                    int prev = screen_step(current_screen, -1);
+                    // Slide forward only when we wrapped past the start.
+                    int d = (prev > current_screen) ? 1 : -1;
                     transition_screen(prev, d);
                     screen_transitioned = true;
                 }
@@ -12090,9 +12440,9 @@ static void handle_keyboard_input() {
                     continue;
                 }
                 if (!stealth_mode && !screen_transitioned) {
-                    int next = current_screen + 1;
-                    int d = (next >= NUM_SCREENS) ? -1 : 1;
-                    if (next >= NUM_SCREENS) next = 0;
+                    int next = screen_step(current_screen, +1);
+                    // Slide backward only when we wrapped past the end.
+                    int d = (next < current_screen) ? -1 : 1;
                     transition_screen(next, d);
                     screen_transitioned = true;
                 }
@@ -12214,8 +12564,10 @@ static void handle_keyboard_input() {
                                 : (fe.proto == 0 ? "WIFI" : "BLE");
                             signal_start(fe.mac, fe.name, type_str, 0);
                             trigger_toast("TARGET", fe.name, 0);
+                            // Already jumps to the target screen — which is now
+                            // the only way in, since it is out of the carousel.
                             show_feed_expanded = false;
-                            transition_screen(1, 1);
+                            transition_screen(SCREEN_TARGET, 1);
                         }
                     }
                 } else if (!stealth_mode && current_screen == 2 && hist_detail_open) {
@@ -12238,7 +12590,7 @@ static void handle_keyboard_input() {
                         signal_start(t_mac, t_name, t_type, t_id);
                         trigger_toast("TARGET", t_name, 0);
                         hist_detail_open = false;
-                        transition_screen(1, 1);
+                        transition_screen(SCREEN_TARGET, 1);
                     }
                 } else if (!stealth_mode && capture_history_count > 0) {
                     static int target_select_idx = -1;
@@ -12254,7 +12606,7 @@ static void handle_keyboard_input() {
 
                     signal_start(t_mac, t_name, t_type, t_id);
                     trigger_toast("TARGET", t_name, t_conf);
-                    transition_screen(1, 1);
+                    transition_screen(SCREEN_TARGET, 1);
                 } else if (!stealth_mode) {
                     trigger_toast("INFO", "No targets yet", 0);
                 }
@@ -12302,7 +12654,7 @@ static void handle_keyboard_input() {
             else if (c == 'l') {
                 if (signal_active && !stealth_mode) {
                     signal_stop();
-                    trigger_toast("SIGNAL", "Target cleared", 0);
+                    trigger_toast("TARGET", "Target cleared", 0);
                     beep(500, 60);
                     screen_dirty = true;
                 }
@@ -12670,9 +13022,8 @@ void loop() {
             // pressed — prevents double-transition when BtnA fires
             // alongside an arrow key on the Cardputer keyboard deck.
             if (!export_mode_active) {
-                int next_screen = current_screen + 1;
-                int dir = (next_screen >= NUM_SCREENS) ? -1 : 1;
-                if (next_screen >= NUM_SCREENS) next_screen = 0;
+                int next_screen = screen_step(current_screen, +1);
+                int dir = (next_screen < current_screen) ? -1 : 1;
                 transition_screen(next_screen, dir);
             }
         }
