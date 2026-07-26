@@ -742,7 +742,17 @@ static inline unsigned long current_dedup_window_ms() {
 #define WILDCARD_WINDOW_MS      30000  // Observation window (ms) — reset per MAC on expiry
 #define WILDCARD_TRACKER_SIZE   32     // Max simultaneously-tracked source MACs (fixed-size, no alloc)
 
-#define CONFIDENCE_ALARM_THRESHOLD 75   
+// 70, lowered from 75, so a Tier-2 OUI emitting a wildcard probe at close range
+// (SCORE_STRONG 60 + SCORE_BONUS_RSSI 10) reaches the alarm. Previously the 45
+// Tier-2 prefixes could log but never beep, since 70 was the ceiling for
+// Tier-2-only evidence.
+//
+// Deliberate side effects, both requiring RSSI > -50 (i.e. very close):
+//   * a Tier-1 OUI now alarms on its own (60 + 10)
+//   * an addr1_t1 sleeping-device hit now alarms on its own (60 + 10)
+// This also moves the "MEDIUM" label boundary in confidence_label(), so scores
+// of 70-74 now read MEDIUM rather than LOW.
+#define CONFIDENCE_ALARM_THRESHOLD 70   
 #define CONFIDENCE_HIGH            85   
 #define CONFIDENCE_CERTAIN         100  
 
@@ -1803,6 +1813,27 @@ static int32_t charge_mode_read_mv() {
     return sum / N;
 }
 
+// Charge Mode's own pill renderer. Geometry mirrors drawPill_lcd() exactly — width
+// len*6+7, height 12, radius 3, 18% fill, 40% border, text inset +3/+2 — so this
+// screen reads as part of the same app. It cannot simply CALL drawPill_lcd():
+// that is defined further down the file AND reads BG_COLOR/TEXT_COLOR, which
+// apply_color_palette() has not populated this early in boot. Hence the copy,
+// taking its colours as arguments from Charge Mode's hardcoded palette.
+static void charge_pill(int x, int y, const char* text,
+                        uint16_t accent, uint16_t bg, uint16_t fg) {
+    auto& lcd = M5Cardputer.Display;
+    int tw = (int)strlen(text) * 6 + 7;   // 6px per char at text size 1
+    int th = 12;
+    uint16_t pill_bg  = lerp_col16(bg, accent, 0.18f);
+    uint16_t pill_brd = lerp_col16(bg, accent, 0.40f);
+    lcd.fillRoundRect(x, y, tw, th, 3, pill_bg);
+    lcd.drawRoundRect(x, y, tw, th, 3, pill_brd);
+    lcd.setTextColor(fg, pill_bg);
+    lcd.setTextSize(1);
+    lcd.setCursor(x + 3, y + 2);
+    lcd.print(text);
+}
+
 // Terminal battery protection for Charge Mode. Reached only when the not-
 // charging watch has confirmed no charger AND the pack has fallen to
 // CHARGE_MODE_DEAD_MV: there is nothing coming in and nothing left to spend, so
@@ -2166,16 +2197,7 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
 
                     lcd.fillScreen(COL_BG);
                     lcd.setTextDatum(TL_DATUM);
-                    lcd.setTextColor(COL_LOW, COL_BG);
-                    lcd.setTextSize(1);
-                    {
-                        int tx = PAD;
-                        for (const char* p = "NOT CHARGING"; *p; p++) {
-                            char ch[2] = {*p, '\0'};
-                            lcd.drawString(ch, tx, PAD);
-                            tx += 6 + 2;
-                        }
-                    }
+                    charge_pill(PAD, PAD, "NOT CHARGING", COL_LOW, COL_BG, COL_TEXT);
                     lcd.setTextColor(COL_TEXT, COL_BG);
                     lcd.setTextSize(2);
                     lcd.drawString("check cable", PAD, 46);
@@ -2249,17 +2271,8 @@ void run_charge_mode(bool user_requested, bool after_brownout) {
             lcd.fillScreen(COL_BG);
             lcd.setTextDatum(TL_DATUM);
 
-            // Title — small, wide tracking (+2px between chars at size 1).
-            lcd.setTextColor(accent, COL_BG);
-            lcd.setTextSize(1);
-            {
-                int tx = PAD;
-                for (const char* p = "CHARGE MODE"; *p; p++) {
-                    char ch[2] = {*p, '\0'};
-                    lcd.drawString(ch, tx, PAD);
-                    tx += 6 + 2;
-                }
-            }
+            // Title pill — same shape as every other pill in the app.
+            charge_pill(PAD, PAD, "CHARGE MODE", accent, COL_BG, COL_TEXT);
 
             // Footer hint (instruction, not data). Bottom margin mirrors the
             // title's PAD, but measured to the lowercase BODY: bottom-anchoring
@@ -2421,19 +2434,59 @@ static const char* wifi_ssid_patterns[] = {
     // HEX suffix, so non-hex variants previously fell through everything.
     // Deliberately low-yield by design: an SSID match alone scores SCORE_WEAK
     // (25), well under CONFIDENCE_ALARM_THRESHOLD, so a coincidental hit on a
-    // home network cannot raise an alarm on its own.
+    // home network cannot raise an alarm on its own. (Still true at the lowered
+    // threshold of 70: an SSID match alone tops out at 25 + 10 = 35.)
     "flock"
 };
 static const int NUM_SSID_PATTERNS = sizeof(wifi_ssid_patterns) / sizeof(wifi_ssid_patterns[0]);
 
 static const OuiEntry mac_prefixes[] = {
-    // ── OUI_SPECIFIC — directly attributed to Flock Safety or confirmed components ──
-    {"b4:1e:52", OUI_SPECIFIC},   // Flock Safety — IEEE registered OUI
-    {"e4:aa:ea", OUI_SPECIFIC},   // LiteOn — most-observed Flock production OUI
-    {"00:09:01", OUI_SPECIFIC},   // XUNTONG — Flock Penguin battery (Field Reference May 2026)
-    // Pending manual IEEE lookup — keep until registrant confirmed or denied
-    {"4c:6e:44", OUI_SPECIFIC}, {"d8:a0:d8", OUI_SPECIFIC}, {"a0:b7:65", OUI_SPECIFIC},
-    {"f0:82:c0", OUI_SPECIFIC}, {"b4:e3:f9", OUI_SPECIFIC}, {"04:0d:84", OUI_SPECIFIC},
+    // ── OUI_SPECIFIC — directly attributed to Flock Safety ──────────────────
+    // Exactly one entry earns Tier 1. Verified 2026-07-26 against three
+    // independent sources — IEEE oui.txt (MA-L), manuf2 (56,505, incl. MA-M/MA-S),
+    // and Ringmast4r/OUI-Master-Database (88,873 merged, incl. IAB + CID, plus
+    // Wireshark and Nmap). All three agree: b4:1e:52 is the ONLY OUI assigned to
+    // Flock Safety. (Beware 8c:1f:64 — that is "Flock Audio Inc.", a pro-audio
+    // company with no relation.) Since CONFIDENCE_ALARM_THRESHOLD dropped to 70, Tier 1
+    // alarms unaided at close range, so membership here must mean "this IS
+    // Flock", not "this was seen near Flock".
+    {"b4:1e:52", OUI_SPECIFIC},   // Flock Safety — IEEE registered, sole entry
+    // ── Demoted from Tier 1 on 2026-07-26 after registry lookup ─────────────
+    // Every one of these is a real component vendor whose silicon appears both in
+    // Flock hardware and in unrelated consumer products, so none can carry alarm
+    // weight on its own. They lose nothing that matters: at Tier 2 a wildcard
+    // probe still scores SCORE_STRONG + the RSSI bonus = 70, so they DO alarm
+    // when exhibiting the camera's channel-hopping behaviour — just not merely
+    // by existing nearby.
+    {"e4:aa:ea", OUI_GENERIC},    // Liteon Technology Corp — most-observed Flock production OUI
+    {"00:09:01", OUI_GENERIC},    // Shenzhen Shixuntong ("XUNTONG") — Flock Penguin battery
+    {"a0:b7:65", OUI_GENERIC},    // Espressif Inc — plain ESP32. At Tier 1 this alarmed on our
+                                  // OWN hardware: Plume is an ESP32-S3 and the C5 sniffer an
+                                  // ESP32-C5. Joins d4:ad:fc / ac:67:b2 already listed below.
+    {"f0:82:c0", OUI_GENERIC},    // Silicon Laboratories — commodity IoT radio
+    {"b4:e3:f9", OUI_GENERIC},    // Silicon Laboratories
+    {"04:0d:84", OUI_GENERIC},    // Silicon Laboratories
+    // These two were "pending IEEE lookup" for a long time. Resolved 2026-07-26
+    // against three sources: IEEE oui.txt (MA-L, 39k), manuf2 (56k incl. MA-M/
+    // MA-S), and Ringmast4r/OUI-Master-Database (88,873 merged — IEEE MA-L +
+    // MA-M + MA-S + IAB + CID, plus Wireshark and Nmap). They came back
+    // different, and neither is a usable vendor signature:
+    //
+    //   4c:6e:44 — an IEEE Registration Authority SUBDIVIDED block (which is why
+    //     the MA-L-only registries missed it). The 24-bit prefix is split into
+    //     /28 and /36 sub-assignments across many unrelated companies — one known
+    //     holder is Shenzhen iTayga Technology. So a 3-byte match here identifies
+    //     no vendor at all; it is ambiguous by construction. Only a longer prefix
+    //     could mean anything.
+    //
+    //   d8:a0:d8 — ZERO matches across all 88,873 merged entries. Genuinely
+    //     unassigned, so it cannot be any production device's registered address.
+    //     Almost certainly a transcription error or a randomised/spoofed MAC that
+    //     got recorded as an observation.
+    //
+    // Both retained at Tier 2 for logging only. Delete either if it never
+    // produces a corroborated hit.
+    {"4c:6e:44", OUI_GENERIC}, {"d8:a0:d8", OUI_GENERIC},
     // ── OUI_GENERIC — commodity / component-vendor silicon ──
     {"74:4c:a1", OUI_GENERIC}, {"94:34:69", OUI_GENERIC}, {"38:5b:44", OUI_GENERIC},
     {"94:08:53", OUI_GENERIC}, {"1c:34:f1", OUI_GENERIC}, {"a4:cf:12", OUI_GENERIC},
@@ -2455,10 +2508,12 @@ static const OuiEntry mac_prefixes[] = {
     // devices". UNVALIDATED: no capture backs it in that repo, and the pattern
     // reads like a default/placeholder MAC rather than a real vendor allocation,
     // so it is the most false-positive-prone entry in this table. Tier 2 only.
-    // Contained by design — Tier 2 + wildcard probe caps at SCORE_STRONG (60),
-    // +10 RSSI bonus = 70, still under CONFIDENCE_ALARM_THRESHOLD (75): it
-    // cannot alarm without a second independent signal. Remove if it proves
-    // noisy in the feed.
+    // NO LONGER CONTAINED. Tier 2 + wildcard probe = SCORE_STRONG (60) + 10 RSSI
+    // bonus = 70, which now MEETS the lowered CONFIDENCE_ALARM_THRESHOLD (70).
+    // So this unvalidated prefix can sound the alarm on its own at close range.
+    // It is the least-evidenced entry in the table — flock-back lists it with no
+    // capture behind it and it reads like a placeholder MAC. If you get spurious
+    // alarms, delete this line first.
     {"cc:cc:cc", OUI_GENERIC},
     // LiteOn Technology Corporation — WCBN3510A WiFi+BT module
     // Confirmed in Falcon, Sparrow, Falcon Flex, Falcon LR
@@ -5359,7 +5414,15 @@ void process_wifi_event_queue() {
         __atomic_store_n(&ev->ready, 0u, __ATOMIC_RELEASE);
         wifi_eq_read_idx = (wifi_eq_read_idx + 1) % WIFI_EVENT_QUEUE_SIZE;
 
-        if (local.rssi < IGNORE_WEAK_RSSI) continue;
+        // Weak-signal filter, but NOT for known Flock silicon. This used to
+        // discard below -80 dBm before any signature check ran, which capped
+        // detection range blind — a camera at -85 was thrown away unexamined.
+        // check_mac_prefix() is 54 three-byte memcmps against rt_oui[].bytes,
+        // so consulting it here is essentially free. addr1 is checked too, since
+        // the sleeping-device technique keys off the receiver address.
+        if (local.rssi < IGNORE_WEAK_RSSI
+            && check_mac_prefix(local.mac)   == OUI_NONE
+            && check_mac_prefix(local.addr1) == OUI_NONE) continue;
 
         // Parse tagged parameters from the raw payload snapshot.
         // This was previously done in the sniffer callback; deferring it
@@ -5602,7 +5665,11 @@ static void ble_worker_task(void* pvParameters) {
 
         BleEventData* ev = &ble_pool[pool_idx];
 
-        if (ev->rssi < IGNORE_WEAK_RSSI) { __atomic_store_n(&ev->in_use, 0u, __ATOMIC_RELEASE); continue; }
+        // Same reasoning as the WiFi path: a known OUI overrides the weak-signal
+        // cutoff so distant Flock hardware is still scored.
+        if (ev->rssi < IGNORE_WEAK_RSSI && check_mac_prefix(ev->mac) == OUI_NONE) {
+            __atomic_store_n(&ev->in_use, 0u, __ATOMIC_RELEASE); continue;
+        }
 
         int  confidence   = 0;
         char methods[64]  = {0};
@@ -11037,6 +11104,7 @@ static void c5_handle_line(char* line) {
     if (f[0][0] == 'F' && nf >= 5) {     // F|mac|name|rssi|ch — ambient 5 GHz
         c5_last_msg_ms = millis();
         const char* mac  = f[1];
+        clean_device_name_char(f[2]);   // C5 names were reaching the UI unscrubbed
         const char* name = f[2];
         int         rssi = atoi(f[3]);
         if (mac[0] && !is_mac_whitelisted(mac))
@@ -11048,6 +11116,7 @@ static void c5_handle_line(char* line) {
         c5_last_msg_ms = millis();
 
         const char* mac     = f[1];
+        clean_device_name_char(f[2]);   // as above, for the detection path
         const char* name    = f[2];
         int         rssi    = atoi(f[3]);
         int         channel = atoi(f[4]);

@@ -118,7 +118,18 @@ static const int kNumMacTier2 = sizeof(kMacTier2) / sizeof(kMacTier2[0]);
 #define OUI_PREFIX_LEN 9      // "xx:xx:xx" + NUL
 #define SSID_PAT_LEN   33
 
-struct OuiRT { char prefix[OUI_PREFIX_LEN]; uint8_t tier; };  // tier 1=strong, 2=weak
+// bytes[] mirrors prefix[] so matching is a 3-byte memcmp instead of formatting a
+// string and running strncmp per entry — the S3 has always done it this way, and
+// this runs in the hot scoring path on the board that is at 240 MHz.
+struct OuiRT { char prefix[OUI_PREFIX_LEN]; uint8_t bytes[3]; uint8_t tier; };  // tier 1=strong, 2=weak
+
+// Parse "aa:bb:cc" into 3 raw bytes. Returns false on malformed input.
+static bool oui_prefix_to_bytes(const char* str, uint8_t out[3]) {
+    unsigned a1, b1, c1;
+    if (sscanf(str, "%2x:%2x:%2x", &a1, &b1, &c1) != 3) return false;
+    out[0] = (uint8_t)a1; out[1] = (uint8_t)b1; out[2] = (uint8_t)c1;
+    return true;
+}
 static OuiRT g_oui[RT_OUI_MAX];                 static int g_oui_count  = 0;
 static char  g_ssid[RT_SSID_MAX][SSID_PAT_LEN]; static int g_ssid_count = 0;
 
@@ -126,10 +137,12 @@ static void sig_seed_defaults() {
     g_oui_count = 0;
     for (int i = 0; i < kNumMacTier1 && g_oui_count < RT_OUI_MAX; i++) {
         strlcpy(g_oui[g_oui_count].prefix, kMacTier1[i], OUI_PREFIX_LEN);
+        oui_prefix_to_bytes(g_oui[g_oui_count].prefix, g_oui[g_oui_count].bytes);
         g_oui[g_oui_count].tier = 1; g_oui_count++;
     }
     for (int i = 0; i < kNumMacTier2 && g_oui_count < RT_OUI_MAX; i++) {
         strlcpy(g_oui[g_oui_count].prefix, kMacTier2[i], OUI_PREFIX_LEN);
+        oui_prefix_to_bytes(g_oui[g_oui_count].prefix, g_oui[g_oui_count].bytes);
         g_oui[g_oui_count].tier = 2; g_oui_count++;
     }
     g_ssid_count = 0;
@@ -200,10 +213,8 @@ static struct {
 
 // ───────────────────────────── matching (uses runtime tables) ───────────────
 static int mac_prefix_tier(const uint8_t* mac) {   // 1=tier1, 2=tier2, 0=none
-    char s[9];
-    snprintf(s, sizeof(s), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
     for (int i = 0; i < g_oui_count; i++)
-        if (strncmp(s, g_oui[i].prefix, 8) == 0) return g_oui[i].tier;
+        if (memcmp(mac, g_oui[i].bytes, 3) == 0) return g_oui[i].tier;
     return 0;
 }
 static bool ssid_pattern_match(const char* ssid) {
@@ -632,6 +643,8 @@ static void link_handle_line(char* line) {
     if (strcmp(f[0], "SO") == 0 && nf >= 3 && g_sig_syncing) {
         if (g_oui_stage_n < RT_OUI_MAX) {
             strlcpy(g_oui_stage[g_oui_stage_n].prefix, f[1], OUI_PREFIX_LEN);
+            oui_prefix_to_bytes(g_oui_stage[g_oui_stage_n].prefix,
+                                g_oui_stage[g_oui_stage_n].bytes);
             g_oui_stage[g_oui_stage_n].tier = (uint8_t)atoi(f[2]);
             g_oui_stage_n++;
         }
