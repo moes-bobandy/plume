@@ -902,9 +902,13 @@ static char mac_whitelist[MAX_WHITELIST][18];
 static int  mac_whitelist_count = 0;
 static const char WHITELIST_FILE[] = "/wl.txt";
 
+// ts first on purpose. With char mac[18] leading, ts needs 2 bytes of padding to
+// reach 4-byte alignment and the struct tail needs 3 more — 28 bytes. Putting
+// the aligned member first drops that to 24. At 64 instances (seen_mac_table
+// plus the static temp[] in seen_mac_expire) that is 256 bytes of DRAM.
 struct SeenMacEntry {
-    char   mac[18];
     unsigned long ts;
+    char   mac[18];
     bool   occupied;
 };
 static SeenMacEntry seen_mac_table[MAX_SEEN_MACS];
