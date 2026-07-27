@@ -3892,29 +3892,31 @@ static void save_session_to_flash() {
     xSemaphoreGiveRecursive(dataMutex);
 
     // Minimum acceptable byte count for a complete write. Computed from all
-    // 16 lines below assuming empty ssid/pass strings: each contributes at
-    // least its key + '=' + minimum value + '\n'. A real write with non-empty
-    // fields runs ~180-220 bytes. Anything below this floor means the write
-    // truncated mid-stream.
+    // 14 lines below: each contributes at least its key + '=' + minimum value
+    // + '\n'. A real write runs ~120-140 bytes. Anything below this floor means
+    // the write truncated mid-stream.
     //
     //   wifi=0\n       (7)   ble=0\n        (6)   seconds=0\n    (10)
     //   flock=0\n      (8)   volume=0\n     (9)   boots=0\n      (8)
-    //   writes=0\n     (9)   ssid=\n        (6)   pass=\n        (6)
-    //   next_id=0\n    (10)  night=0\n      (8)   brightness=0\n (13)
-    //   low_power=0\n  (12)  muted=0\n      (8)   turbo=0\n      (8)
-    //   c5=0\n         (5)
-    //   Sum: 133 bytes (empty-field floor)
+    //   writes=0\n     (9)   next_id=0\n    (10)  night=0\n      (8)
+    //   brightness=0\n (13)  low_power=0\n  (12)  muted=0\n      (8)
+    //   turbo=0\n      (8)   c5=0\n         (5)
+    //   Sum: 121 bytes (minimum-field floor)
     //
-    // The constant sits 13 bytes under that floor as slack. Note the tradeoff:
-    // no legitimate write can come in below 133, so 133 would be the tightest
-    // correct value — 120 will still pass a write that truncated after losing
-    // turbo (8) and c5 (5). Raise it to 133 to close that gap.
+    // ssid= and pass= used to be written here and contributed 12 bytes to that
+    // sum. They were removed because storing the WiFi password in plaintext
+    // defeated the obfuscated /wifi_cred.dat entirely.
     //
-    // Keep this list in sync with the printf block below. It had drifted twice
-    // already: turbo and c5 were added without updating either the list or the
-    // constant, which is how a floor of 130 came to sit 13 bytes under a true
-    // minimum of 143 while reading as if it were exact.
-    static const size_t PERSIST_MIN_BYTES = 120;
+    // The constant sits 13 bytes under the true floor as deliberate slack. The
+    // tradeoff is unchanged from before: no legitimate write comes in below 121,
+    // so 121 would be the tightest correct value, and 108 will still pass a
+    // write that truncated after losing turbo (8) and c5 (5).
+    //
+    // Keep this list in sync with the printf block below. It has drifted twice:
+    // turbo and c5 were both added without updating either the list or the
+    // constant, which is how a stated sum of 130 came to describe a file layout
+    // that had not existed for two releases.
+    static const size_t PERSIST_MIN_BYTES = 108;
 
     bool write_ok = false;
     for (int attempt = 0; attempt < 3 && !write_ok; attempt++) {
@@ -3932,8 +3934,6 @@ static void save_session_to_flash() {
             wp(f.printf("volume=%d\n",      l_vol));
             wp(f.printf("boots=%ld\n",      l_boots));
             wp(f.printf("writes=%ld\n",     l_writes));
-            wp(f.printf("ssid=%s\n",        export_ssid));
-            wp(f.printf("pass=%s\n",        export_pass));
             wp(f.printf("next_id=%ld\n",    l_next_id));
             wp(f.printf("night=%d\n",       l_night ? 1 : 0));
             wp(f.printf("brightness=%d\n",  l_brightness));
@@ -4211,18 +4211,6 @@ void load_session_from_flash() {
         else if (key == "muted")      is_muted = (val.toInt() != 0);
         else if (key == "turbo")      turbo_mode_active = (val.toInt() != 0);
         else if (key == "c5")         c5_enabled = (val.toInt() != 0);
-        else if (key == "ssid") {
-            if (val.length() > 0 && val.length() < sizeof(export_ssid)) {
-                strncpy(export_ssid, val.c_str(), sizeof(export_ssid) - 1);
-                export_ssid[sizeof(export_ssid) - 1] = '\0';
-            }
-        }
-        else if (key == "pass") {
-            if (val.length() > 0 && val.length() < sizeof(export_pass)) {
-                strncpy(export_pass, val.c_str(), sizeof(export_pass) - 1);
-                export_pass[sizeof(export_pass) - 1] = '\0';
-            }
-        }
         // Unknown keys are silently ignored — forward compatibility
     }
     f.close();
