@@ -415,6 +415,26 @@ static inline void safe_copy(char* dest, const char* src, size_t dest_size) {
     strlcpy(dest, src, dest_size);
 }
 
+// A CSV field starting with = + - or @ executes as a formula when the log is
+// opened in Excel, LibreOffice, or Google Sheets — and opening these logs in a
+// spreadsheet is the documented workflow. An attacker controls their own AP's
+// SSID completely, so prefix an apostrophe, which every major spreadsheet
+// treats as "the rest of this cell is literal text".
+//
+// CSV-write concern only. Deliberately NOT folded into
+// clean_device_name_char(), which also feeds the on-screen feed and the C5
+// link — a name should render as itself there, not with a stray apostrophe.
+static void csv_defuse_formula(char* s, size_t cap) {
+    if (!s || !s[0] || cap < 3) return;
+    char c0 = s[0];
+    if (c0 != '=' && c0 != '+' && c0 != '-' && c0 != '@') return;
+    size_t len = strlen(s);
+    if (len + 2 > cap) len = cap - 2;   // truncate to make room for the quote + NUL
+    memmove(s + 1, s, len);
+    s[0] = '\'';
+    s[len + 1] = '\0';
+}
+
 // ── Unified UI animation vocabulary ──
 // One easing curve, three duration tiers, one slide distance.
 // Reach for these instead of inventing new constants.
@@ -4972,6 +4992,12 @@ void log_detection(const char* type, const char* proto, int rssi, const char* ma
         char clean_extra[64];
         safe_copy(clean_extra, extra_data, sizeof(clean_extra));
         for (char* p = clean_extra; *p; p++) if (*p == ',') *p = ' ';
+
+        // After the comma strip (which keeps the 21 columns aligned) and before
+        // the row is assembled. Only these two fields: every other column is an
+        // internally generated fixed string or a numeric, never attacker-controlled.
+        csv_defuse_formula(clean_name,  sizeof(clean_name));
+        csv_defuse_formula(clean_extra, sizeof(clean_extra));
 
         // Brief window: GPS snapshot
         char gps_fields[80];
