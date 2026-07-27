@@ -8,6 +8,38 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Removed — the manual Charge Mode entry path
+
+Charge Mode itself **stays**, and its automatic entry is untouched: below
+`CHARGE_MODE_ENTER_MV` (3550) at boot, or after a brownout reset, the device
+still holds in the radios-off charging screen instead of starting the app. That
+is anti-bootloop protection and is safety-critical. Only the *manual* "enter
+charge mode on demand" path is gone.
+
+- Removed the `c` key handler, the `Charge Mode` menu row, its
+  `handle_menu_select()` case, its icon dispatch case, and `menu_icon_charge()`
+  (no remaining callers).
+- Removed the request plumbing that carried a manual entry across the reboot:
+  `CHARGE_MODE_MAGIC`, the `RTC_NOINIT_ATTR charge_mode_request` flag, both
+  consume points, and `enter_charge_mode_reboot()` — which had two callers, the
+  key handler and the menu action, so it died with them.
+- `run_charge_mode()` loses its `user_requested` parameter. The resume threshold
+  is now always `CHARGE_MODE_EXIT_MV`, so `CHARGE_MODE_FULL_MV` (4150) went with
+  it — that 4150 target existed only to hold a deliberate top-up near full rather
+  than resuming at the 3750 safe floor. The brownout ratchet simplifies from
+  `if (after_brownout && !user_requested)` to `if (after_brownout)`.
+- `MENU_ROW_COUNT` 19 → 18, and the `static_assert` updated to match. It fired on
+  the first build, which is the guard doing its job. Verified all 13 remaining
+  action `idx` values still map 1:1 to both `handle_menu_select()` cases and
+  `menu_draw_icon()` cases, in both directions — `idx` is not positional, so no
+  other case numbers moved.
+- Untouched: the charge loop, ADC health checks, battery pill rendering,
+  `CHARGE_MODE_ENTER_MV` / `EXIT_MV` / `DEAD_MV`, the stall watch, brownout
+  detection, and the `setCpuFrequencyMhz(80)` restore on exit.
+- 444 bytes of flash. README updated — the `c` row and the menu bullet are gone,
+  replaced by a Battery-section note describing the automatic-only behaviour, so
+  a user who lands in Charge Mode can still find out what it is.
+
 ### Changed — GPS globe hoists per-meridian trig out of the inner loop
 
 - **`proj()` now takes longitude as a precomputed cos/sin pair** instead of an
