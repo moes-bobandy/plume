@@ -10436,6 +10436,32 @@ static unsigned long  c5_last_msg_ms  = 0;
 static char           c5_line_buf[160];
 static uint8_t        c5_line_len     = 0;
 
+// ── TX/RX orientation probe ─────────────────────────────────────────────────
+// Swapping yellow and white on the Grove cable is the most common wiring
+// mistake with this link, and the only symptom used to be a dark 5G badge with
+// no explanation. So instead of assuming the canonical orientation forever, try
+// both and latch whichever one actually carries protocol traffic.
+//
+// SAFETY: probe RX-only, with the TX pin passed as -1 so no pin is driven. On a
+// reversed cable the S3's TX line is already wired into the C5's TX output and
+// two push-pull drivers are fighting each other. That contention exists in
+// hardware whatever the firmware does — but driving our side makes it worse, so
+// a TX pin is only configured once the orientation is known to be right.
+#define C5_PROBE_DWELL_MS   4000   // > the C5's ~3 s heartbeat interval
+#define C5_PROBE_MAX_CYCLES 3      // full A/B passes before warning the user
+
+static int8_t        c5_probe_rx        = C5_RX_PIN;
+static bool          c5_orient_locked   = false;
+static uint8_t       c5_probe_cycles    = 0;
+static bool          c5_probe_warned    = false;
+static unsigned long c5_probe_switch_ms = 0;
+
+// The two Grove data pins are a pair: whichever one we are listening on, the
+// other is the one we would transmit from.
+static inline int8_t c5_tx_for_rx(int8_t rx) {
+    return (rx == C5_RX_PIN) ? C5_TX_PIN : C5_RX_PIN;
+}
+
 // True only when a C5 has actually reported in recently — a user with no C5
 // never sees the 5G badge light.
 bool c5_is_present() {
@@ -10447,10 +10473,18 @@ bool c5_is_present() {
 void c5_link_begin() {
     if (c5_link_started) return;
     SerialC5.setRxBufferSize(512);                       // must precede begin()
-    SerialC5.begin(C5_BAUD, SERIAL_8N1, C5_RX_PIN, C5_TX_PIN);
-    c5_line_len     = 0;
-    c5_link_started = true;
-    Serial.println("[C5] link up on UART1 (Grove G1/G2)");
+    // TX = -1: listen only until the orientation is proven. See the safety note
+    // at the probe state above.
+    SerialC5.begin(C5_BAUD, SERIAL_8N1, C5_RX_PIN, -1);
+    c5_line_len        = 0;
+    c5_link_started    = true;
+    c5_probe_rx        = C5_RX_PIN;
+    c5_orient_locked   = false;
+    c5_probe_cycles    = 0;
+    c5_probe_warned    = false;
+    c5_probe_switch_ms = millis();
+    Serial.printf("[C5] probing for link on UART1, listening on GPIO%d (RX-only)\n",
+                  (int)C5_RX_PIN);
 }
 
 void c5_link_end() {
@@ -10459,11 +10493,24 @@ void c5_link_end() {
     // never reach that board again, and it would otherwise keep sniffing 5 GHz at
     // full power indefinitely, transmitting into a dead line — which is why
     // "5GHz RADIO OFF" previously saved nothing at all.
-    SerialC5.printf("P|1\n");
-    SerialC5.flush();
+    //
+    // Only reachable if the orientation locked: while probing there is no TX pin
+    // configured, so this write would go nowhere at best. Skipping it costs
+    // nothing — a C5 we never established contact with was never told to scan.
+    if (c5_orient_locked) {
+        SerialC5.printf("P|1\n");
+        SerialC5.flush();
+    }
     SerialC5.end();
     c5_link_started = false;
     c5_last_msg_ms  = 0;
+    // Reset the probe so the menu toggle re-detects from scratch — the user may
+    // well be toggling the radio *because* they just reseated the cable.
+    c5_probe_rx        = C5_RX_PIN;
+    c5_orient_locked   = false;
+    c5_probe_cycles    = 0;
+    c5_probe_warned    = false;
+    c5_probe_switch_ms = 0;
     Serial.println("[C5] link down");
 }
 
@@ -10545,6 +10592,53 @@ static void c5_push_power_state(bool force) {
     last_idle = idle;
     SerialC5.printf("P|%d\n", idle);
     Serial.printf("[C5] pushed power state: %s\n", idle ? "idle" : "full");
+}
+
+// Alternate the RX pin until protocol traffic appears, then latch and enable TX.
+// Runs before service_c5_link() so the orientation is settled before the
+// presence-edge logic decides to push signatures.
+static void service_c5_probe() {
+    if (!c5_enabled || !c5_link_started || c5_orient_locked) return;
+
+    // c5_last_msg_ms is set ONLY by c5_handle_line(), and only for a recognized
+    // tag (H/F/D). That makes it exactly the signal wanted here — "valid
+    // protocol traffic arrived on this pin" — with no separate validity check to
+    // get out of sync with the parser.
+    if (c5_last_msg_ms != 0) {
+        int8_t tx = c5_tx_for_rx(c5_probe_rx);
+        SerialC5.end();
+        SerialC5.setRxBufferSize(512);                   // must precede begin()
+        SerialC5.begin(C5_BAUD, SERIAL_8N1, c5_probe_rx, tx);
+        c5_line_len      = 0;
+        c5_orient_locked = true;
+        bool reversed = (c5_probe_rx != C5_RX_PIN);
+        Serial.printf("[C5] orientation locked: RX=GPIO%d TX=GPIO%d%s\n",
+                      (int)c5_probe_rx, (int)tx,
+                      reversed ? "  (Grove cable is REVERSED - yellow/white swapped)"
+                               : "  (standard wiring)");
+        return;
+    }
+
+    if (millis() - c5_probe_switch_ms < C5_PROBE_DWELL_MS) return;
+
+    // Nothing heard on this pin within the dwell — try the other one, still
+    // RX-only.
+    c5_probe_rx = (c5_probe_rx == C5_RX_PIN) ? C5_TX_PIN : C5_RX_PIN;
+    SerialC5.end();
+    SerialC5.setRxBufferSize(512);                       // must precede begin()
+    SerialC5.begin(C5_BAUD, SERIAL_8N1, c5_probe_rx, -1);
+    c5_line_len        = 0;
+    c5_probe_switch_ms = millis();
+    if (c5_probe_rx == C5_RX_PIN) c5_probe_cycles++;     // wrapped = one full A/B pass
+
+    // Warn once, then keep probing forever: a C5 powered up later, or a cable
+    // reseated mid-session, must still be found. Repeating the toast would just
+    // train the user to ignore it.
+    if (c5_probe_cycles >= C5_PROBE_MAX_CYCLES && !c5_probe_warned) {
+        c5_probe_warned = true;
+        set_toast_direct("NO C5 - CHECK WIRING", TOAST_WARNING, false);
+        Serial.println("[C5] no protocol traffic on either pin - check the Grove cable");
+    }
 }
 
 static void service_c5_link() {
@@ -12747,6 +12841,7 @@ void loop() {
 
     process_wifi_event_queue();
     process_c5_serial();        // drain 5 GHz hits from the C5 (self-guards when link is off)
+    service_c5_probe();         // latch TX/RX orientation before anything transmits
     service_c5_link();          // sig + time push, presence-edge driven
     feed_commit_pending();
     update_channel_histogram();

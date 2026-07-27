@@ -8,6 +8,44 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Added — C5 link orientation auto-detection
+
+- **A reversed Grove cable now just works.** Swapping yellow and white is the
+  most common wiring mistake with this link, and the only symptom was a dark
+  `5G` badge with no explanation. Plume now probes both data pins, latches
+  whichever one carries valid protocol traffic, and logs whether the cable is
+  reversed.
+- **Probing is receive-only.** `begin()` is called with the TX pin as `-1` until
+  the orientation is proven. On a reversed cable the S3's TX line is already
+  wired into the C5's TX output, so two push-pull drivers are fighting; that
+  contention exists in hardware whatever the firmware does, but Plume no longer
+  adds to it. A TX pin is configured only after a recognized tag has arrived.
+- Validity is `c5_last_msg_ms`, which `c5_handle_line()` sets only for a
+  recognized `H`/`F`/`D` tag — so "traffic on this pin" cannot drift out of sync
+  with what the parser actually accepts. 4 s dwell per pin, one warning toast
+  after three full A/B passes, then probing continues indefinitely so a C5
+  powered up later is still found.
+- `c5_link_end()` skips the `P|1` radio-idle write when the orientation never
+  locked — there is no TX pin to write through, and a C5 we never reached was
+  never told to scan. Toggling `5GHz Radio` off and on restarts the probe from
+  scratch, which is what you want if the reason for toggling was reseating the
+  cable.
+- Presence detection (`c5_is_present()`, the 8 s heartbeat timeout) and the
+  presence-edge signature push are untouched. Orientation and presence are
+  separate problems.
+
+### Fixed — PROTOCOL.md described a reverse channel that has been in use for releases
+
+- The Link table claimed `C5 -> Cardputer (the reverse channel is wired but
+  unused in v1)`. Plume transmits time sync, radio power state, LED mirroring and
+  a full signature table. Direction is now documented as bidirectional, with an
+  Orientation row for the new probe.
+- Added a **Messages (Cardputer -> C5)** section covering `T|`, `P|`, `L|` and the
+  `SB`/`SO|`/`SS|`/`SE|` signature transaction, and documented the `F|` ambient
+  sighting tag, which was undocumented despite driving the 5 GHz feed. Field
+  layouts were read from the printf call sites and the C5-side parser, not
+  inferred.
+
 ### Fixed — ESC did not close the WiFi config overlay
 
 - **The key labelled `esc` now backs out of WiFi config.** The overlay footer
