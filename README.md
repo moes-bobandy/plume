@@ -106,6 +106,7 @@ Cards: Session Detections / Lifetime Detections, WiFi / BLE / Raven, Session Upt
 | `` ` `` | Toggle mute |
 | `n` | Toggle night mode |
 | `b` | Cycle brightness (dim / mid / full) |
+| `c` | Charge Mode — reboot into radios-off charging with a live status screen (press any key to start the app) |
 | `f` | Toggle expanded feed overlay |
 | `t` | Target device for signal tracking |
 | `l` | Clear signal target |
@@ -134,6 +135,7 @@ Press `m`. Navigate with up/down, select with Enter.
 - Low Power Mode — 80 MHz CPU, reduced BLE scan duty (50%), longer battery life. Mutually exclusive with turbo.
 - Mute Beeps — silences all tones
 - Turbo Mode — 240 MHz CPU, faster channel hopping (150ms vs 250ms), 30-second dedup window (vs 5 minutes). Mutually exclusive with low power.
+- Charge Mode — reboots into a radios-off charging state with a live percent/voltage readout (same as the `c` key)
 
 **Tools:**
 - WiFi Config — set SSID and password for export mode (AES-encrypted on flash)
@@ -373,8 +375,6 @@ Flash wear monitoring toasts at 80K writes (warning) and 100K (critical).
 Battery percentage uses a 9-point piecewise linear LiPo curve (4200mV=100% through 3300mV=0%). Load-aware telemetry compensates for voltage sag during WiFi promiscuous mode (+45mV), active BLE scanning (+35mV), and speaker playback (+80mV). EMA-filtered ADC readings at 250ms intervals.
 
 Warnings at 3.7V (low) and 3.5V (critical), with 100mV hysteresis to prevent strobe on noisy ADC. Re-warnings every 10 min (low) or 2 min (critical). Auto-restart at 3.0V to prevent deep discharge.
-
-**Charge Mode** is entered automatically, not on demand. If the cell is below 3550mV at boot, or the last boot ended in a brownout reset, the device holds in a radios-off charging screen with a live percent/voltage readout instead of starting the app. This is anti-bootloop protection: radio init on a cell that cannot power it browns out immediately, and without the gate the device would reboot in a loop until the pack was deeply discharged. It resumes the normal app once the cell holds above 3750mV, or immediately on any keypress.
 
 **Approximate runtime:**
 - Normal mode (160 MHz): 4–6 hours depending on RF density

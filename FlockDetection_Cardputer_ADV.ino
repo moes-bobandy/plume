@@ -139,9 +139,8 @@ static const uint8_t AMBIENT_BRIGHTNESS = 40;
 // A minimal, radios-off holding state that (a) prevents the brown-out boot loop
 // when the cell is too low to survive radio init, and (b) charges as fast as
 // this fixed-charge-current hardware allows by cutting every avoidable load.
-// Entered automatically at boot below CHARGE_MODE_ENTER_MV, or on a brownout
-// reset. There is no manual entry: it exists for anti-bootloop protection, not
-// as a user-selectable charging screen.
+// Entered automatically at boot below CHARGE_MODE_ENTER_MV, or on demand via
+// the 'c' key (which sets charge_mode_request in RTC RAM and reboots into it).
 // Exits — resuming the normal app — once the cell HOLDS above CHARGE_MODE_EXIT_MV
 // for a sustained window, or on any keypress. Thresholds are millivolts measured
 // under charge-mode's own near-zero load; EXIT sits well above ENTER so the
@@ -160,7 +159,12 @@ static const uint8_t AMBIENT_BRIGHTNESS = 40;
 // than in the loop logic — the algorithm is board-agnostic, only the numbers
 // and the charge-status signal differ.
 #define CHARGE_MODE_ENTER_MV  3550          // boot below this -> charge mode (anti-bootloop)
-#define CHARGE_MODE_EXIT_MV   3750          // hold above this -> resume the app
+#define CHARGE_MODE_EXIT_MV   3750          // AUTO-entered: hold above this -> resume the app
+// USER-requested charge (the 'c' key) isn't about brown-out safety — the user
+// wants to top the cell up — so it must NOT resume at the 3.75V safe floor.
+// It holds until the cell is essentially full or the user presses a key. On this
+// trickle charger it may never reach full, which is fine: a keypress always exits.
+#define CHARGE_MODE_FULL_MV   4150          // USER-requested: hold above this -> resume the app
 // ── "Not actually charging" watch ───────────────────────────────────────────
 // Nothing on this board reports charge state (isCharging() is always 2/unknown
 // and there is no VBUS line), so a dead cable, a dead port, or an unplug while
@@ -187,6 +191,13 @@ static const uint8_t AMBIENT_BRIGHTNESS = 40;
 // 2.5-3.0V), whereas a failed adc_oneshot init returns a flat 0. The two must
 // be handled differently — see the ADC health block in run_charge_mode.
 #define BATT_ADC_MIN_PLAUSIBLE_MV 100
+#define CHARGE_MODE_MAGIC     0x50C0FFEEUL  // "enter charge mode on next boot" sentinel
+// RTC_NOINIT, not RTC_DATA: an initialized RTC_DATA var gets reloaded from the
+// app image on a normal reboot, so the request was being wiped by the very
+// restart meant to carry it (charge mode came up only intermittently). NOINIT
+// retains its value across esp_restart(); the boot gate additionally requires
+// an ESP_RST_SW reset before honoring it, so power-on garbage can't false-fire.
+RTC_NOINIT_ATTR uint32_t charge_mode_request;
 static bool ambient_mode = false;
 // Deeper idle tier below ambient: backlight fully off and the panel asleep.
 // The backlight is the largest controllable load on this board (field note:
@@ -239,6 +250,7 @@ static const MRow MENU_ROWS[] = {
     {1,  7, "Mute Beeps"},
     {1,  8, "Turbo Mode"},
     {1, 12, "5GHz Radio"},
+    {1, 13, "Charge Mode"},
     {2, -1, ""},
     {0, -1, "ACTIONS"},
     {1,  9, "WiFi Config"},
@@ -247,7 +259,7 @@ static const MRow MENU_ROWS[] = {
 };
 static const int MENU_ROW_COUNT = sizeof(MENU_ROWS) / sizeof(MENU_ROWS[0]);
 
-static_assert(MENU_ROW_COUNT == 18, "MENU_ROWS changed — update this guard and verify handle_menu_select() cases match");
+static_assert(MENU_ROW_COUNT == 19, "MENU_ROWS changed — update this guard and verify handle_menu_select() cases match");
 
 static int menu_next_idx(int cur, int dir) {
     int pos = -1;
@@ -1819,12 +1831,16 @@ static void charge_mode_sleep_forever() {
 // Minimal charging screen + hold loop. Self-contained (hardcoded colors, direct
 // LCD) because it runs during early boot before the runtime palette and the
 // draw sprite exist. Returns when the user presses a key ("start now") or the
-// cell holds above CHARGE_MODE_EXIT_MV — the safe-to-run floor — long enough.
-// A brownout entry additionally ratchets the threshold above the current resting
-// voltage (see below) so a boot that browns out ABOVE the floor can't retry-loop
-// at a level that already failed. The caller then continues normal boot.
-void run_charge_mode(bool after_brownout) {
-    int32_t resume_mv = CHARGE_MODE_EXIT_MV;
+// cell holds above the resume threshold long enough. That threshold depends on
+// WHY we're here: an auto entry (low battery / brownout) resumes at the
+// safe-to-run floor CHARGE_MODE_EXIT_MV, while a user 'c'-request is a deliberate
+// top-up and holds until CHARGE_MODE_FULL_MV. A brownout entry additionally
+// ratchets the threshold above the current resting voltage (see below) so a
+// boot that browns out ABOVE the floor can't retry-loop at a level that already
+// failed. The caller then continues normal boot.
+void run_charge_mode(bool user_requested, bool after_brownout) {
+    int32_t resume_mv = user_requested ? CHARGE_MODE_FULL_MV : CHARGE_MODE_EXIT_MV;
+    charge_mode_request = 0;                 // consume the request (auto-re-entry is voltage-driven)
     setCpuFrequencyMhz(40);                  // lowest safe clock = least load
     auto& lcd = M5Cardputer.Display;
     lcd.setRotation(1);
@@ -1898,7 +1914,7 @@ void run_charge_mode(bool after_brownout) {
     // until a boot survives. Capped at 4000mV — a level any bootable pack must
     // reach — so a dying cell can't push the target beyond the charger. A
     // keypress still overrides at any time.
-    if (after_brownout) {
+    if (after_brownout && !user_requested) {
         int32_t ratchet = start_mv + 80;
         if (ratchet > 4000)      ratchet = 4000;
         if (ratchet > resume_mv) resume_mv = ratchet;
@@ -2152,7 +2168,8 @@ void run_charge_mode(bool after_brownout) {
             // Auto-resume once the SMOOTHED cell voltage HOLDS above the resume
             // threshold for a sustained window, so ripple can't bounce us into a
             // brown-out the instant the radios load the rail on resume. (resume_mv
-            // is the safe-to-run floor, ratcheted up on a brownout entry.)
+            // is the safe-to-run floor when auto-entered, or the full-charge
+            // target when the user requested this charge.)
             if (mv >= resume_mv) {
                 if (exit_stable_since == 0)                    exit_stable_since = now;
                 else if (now - exit_stable_since >= 4000) {
@@ -6796,6 +6813,13 @@ static void menu_icon_trash(int x, int y, uint16_t col) {
     spr.drawFastVLine(x+6, y+3, 5, BG_COLOR);
 }
 
+static void menu_icon_charge(int x, int y, uint16_t col) {
+    spr.drawRect(x, y+2, 8, 6, col);
+    spr.drawFastVLine(x+8, y+4, 2, col);
+    spr.drawLine(x+4, y+3, x+2, y+5, col);
+    spr.drawLine(x+5, y+4, x+3, y+6, col);
+}
+
 static void menu_draw_icon(int flat_idx, int x, int y, uint16_t col) {
     switch (flat_idx) {
         case 0:  menu_icon_scanner(x, y, col);    break;
@@ -6808,6 +6832,7 @@ static void menu_draw_icon(int flat_idx, int x, int y, uint16_t col) {
         case 7:  menu_icon_mute(x, y, col);       break;
         case 8:  menu_icon_signal(x, y, col);     break;
         case 12: menu_icon_signal(x, y, col);     break;
+        case 13: menu_icon_charge(x, y, col);     break;
         case 9:  menu_icon_wifi(x, y, col);       break;
         case 10: menu_icon_export(x, y, col);     break;
         case 11: menu_icon_trash(x, y, col);      break;
@@ -7255,6 +7280,23 @@ static void set_turbo_mode(bool on) {
     screen_dirty = true;
 }
 
+// Charge Mode: reboot into the radios-off charging screen. A reboot is
+// required to actually shed the WiFi/BLE load; the RTC_NOINIT flag carries
+// the request across esp_restart() to the boot gate. Draw the confirmation
+// directly (the render loop is about to stop, so a toast would never paint).
+// Never returns.
+static void enter_charge_mode_reboot() {
+    charge_mode_request = CHARGE_MODE_MAGIC;
+    auto& lcd = M5Cardputer.Display;
+    lcd.fillScreen(lgfx::color565(0, 0, 0));
+    lcd.setTextDatum(MC_DATUM);
+    lcd.setTextColor(lgfx::color565(60, 210, 120), lgfx::color565(0, 0, 0));
+    lcd.setTextSize(2);
+    lcd.drawString("CHARGE MODE", DISP_W / 2, DISP_H / 2);
+    delay(400);
+    ESP.restart();
+}
+
 void handle_menu_select() {
     // Consume the clear-stats arm on EVERY selection, so choosing any other
     // item disarms it. Only case 11 reads it back.
@@ -7321,6 +7363,14 @@ void handle_menu_select() {
             else            { c5_link_end();   set_toast_direct("5GHz RADIO OFF", TOAST_NEUTRAL); }
             schedule_persist();
             screen_dirty = true;
+            break;
+        case 13:
+            // Flush queued SD deletes synchronously before the reboot (same as
+            // export teardown). No schedule_persist(): its background task would
+            // race the restart, session stats reset on any reboot anyway, and
+            // lifetime stats have their own 60s cadence.
+            flush_pending_deletes();
+            enter_charge_mode_reboot();  // never returns
             break;
         case 9:
             show_feed_expanded = false;
@@ -10915,34 +10965,43 @@ void setup() {
     // ── Charge Mode gate ────────────────────────────────────────────────────
     // Before touching the sprite or radios (the brown-out-prone loads), decide
     // whether the cell can survive a normal boot. If it's below the entry floor,
-    // or we are recovering from a brownout, hold in the radios-off charging
-    // screen until it recovers or a key is pressed. This is what breaks the
-    // low-battery boot loop: we never reach radio init on a cell that can't
-    // power it.
+    // or the user requested charge mode via 'c' (which reboots with this flag),
+    // hold in the radios-off charging screen until it recovers or a key is
+    // pressed. This is what breaks the low-battery boot loop: we never reach
+    // radio init on a cell that can't power it.
     {
         int32_t boot_mv   = charge_mode_read_mv();
         // An implausible reading means the battery ADC failed to initialize, NOT
         // an empty cell (see BATT_ADC_MIN_PLAUSIBLE_MV). Gating on it would send
         // every boot into Charge Mode, which then has no voltage to decide with
         // — a loop that presents as a bricked device. Skip the voltage gate and
-        // boot the app; a brownout still enters (and Charge Mode's own ADC health
-        // check bails straight back out).
+        // boot the app; an explicit 'c' request or a brownout still enters (and
+        // Charge Mode's own ADC health check bails straight back out).
         bool    adc_ok    = (boot_mv > BATT_ADC_MIN_PLAUSIBLE_MV);
         if (!adc_ok)
             Serial.printf("[BOOT] battery ADC implausible (%dmV) - skipping voltage gate\n",
                           (int)boot_mv);
+        // Honor the 'c'-key request only after a software restart (esp_restart);
+        // on power-on the NOINIT value is indeterminate. Consume it immediately
+        // so a stale value can't re-trigger on a later boot.
+        bool    requested = (esp_reset_reason() == ESP_RST_SW)
+                            && (charge_mode_request == CHARGE_MODE_MAGIC);
+        charge_mode_request = 0;
         // A brownout reset means the last boot's radio-init surge collapsed the
         // rail. The resting reading here reads deceptively high (no load yet), so
         // it alone won't stop the loop — but the reset reason will. Hold and
         // charge instead of surging into the same brownout again.
         bool    brownout  = (esp_reset_reason() == ESP_RST_BROWNOUT);
-        Serial.printf("[BOOT] battery=%dmV, brownout=%s\n",
-                      (int)boot_mv, brownout ? "yes" : "no");
-        if (brownout || (adc_ok && boot_mv < CHARGE_MODE_ENTER_MV)) {
-            const char* why = brownout ? "recovering from brownout"
-                                       : "battery below entry floor";
+        Serial.printf("[BOOT] battery=%dmV, charge_mode_request=%s, brownout=%s\n",
+                      (int)boot_mv, requested ? "yes" : "no", brownout ? "yes" : "no");
+        if (requested || brownout || (adc_ok && boot_mv < CHARGE_MODE_ENTER_MV)) {
+            const char* why = requested ? "user request"
+                            : brownout  ? "recovering from brownout"
+                                        : "battery below entry floor";
             Serial.printf("[BOOT] entering Charge Mode (%s)\n", why);
-            run_charge_mode(brownout);
+            // Only a deliberate 'c'-request tops up to full; auto entries resume
+            // at the safe-to-run floor so a low cell isn't held longer than needed.
+            run_charge_mode(requested, brownout);
             // Charge Mode drops to 40 MHz; the 80 MHz set for the brown-out-prone
             // boot window happens ABOVE this gate, so without this the whole
             // post-charge boot ran at half clock.
@@ -12598,6 +12657,9 @@ static void handle_keyboard_input() {
                 } else {
                     set_toast_direct("DAY MODE", TOAST_NEUTRAL);
                 }
+            }
+            else if (c == 'c') {
+                enter_charge_mode_reboot();
             }
             else if (c == 'l') {
                 if (signal_active) {
