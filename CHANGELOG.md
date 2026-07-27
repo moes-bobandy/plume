@@ -8,6 +8,25 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Changed — menu: Charge Mode back, Signal out
+
+- **Manual Charge Mode access restored**, reverting the removal in `6555969`.
+  Automatic entry (low battery / brownout) was never removed and is unaffected;
+  the `c` key and the menu row are back alongside it, along with
+  `CHARGE_MODE_FULL_MV` so a deliberate top-up again holds near full rather than
+  resuming at the 3750 mV safe floor.
+- **`Signal` removed from the menu.** The target-tracking screen is now reachable
+  only by picking a device out of the scanner feed, which is the only context
+  where it means anything — it was already excluded from the `,`/`/` carousel by
+  `screen_in_carousel()`, so the menu row was the last way to land on it with
+  nothing targeted.
+- Worth noting for anyone reading `handle_menu_select()`: idx 1 was part of a
+  fall-through group (`case 0: case 1: case 2: case 3: case 4:`) sharing one
+  body, so only the label came out — the body still serves screens 0, 2, 3 and 4.
+  `menu_icon_signal()` stays too; cases 8 (Turbo) and 12 (5GHz) still call it.
+  `MENU_ROW_COUNT` nets 19 → 18. Verified all 13 remaining idx values map 1:1 to
+  both the handler and the icon dispatch, in both directions.
+
 ### Security — CSV formula injection, and silent signature replacement
 
 - **CSV formula-injection guard.** A field beginning with `=`, `+`, `-` or `@`

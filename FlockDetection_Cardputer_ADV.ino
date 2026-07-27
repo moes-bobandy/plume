@@ -239,7 +239,6 @@ struct MRow { int type; int idx; const char* text; };
 static const MRow MENU_ROWS[] = {
     {0, -1, "SCREENS"},
     {1,  0, "Scanner"},
-    {1,  1, "Signal"},
     {1,  2, "Detections"},
     {1,  3, "GPS"},
     {1,  4, "Stats"},
@@ -259,7 +258,7 @@ static const MRow MENU_ROWS[] = {
 };
 static const int MENU_ROW_COUNT = sizeof(MENU_ROWS) / sizeof(MENU_ROWS[0]);
 
-static_assert(MENU_ROW_COUNT == 19, "MENU_ROWS changed — update this guard and verify handle_menu_select() cases match");
+static_assert(MENU_ROW_COUNT == 18, "MENU_ROWS changed — update this guard and verify handle_menu_select() cases match");
 
 static int menu_next_idx(int cur, int dir) {
     int pos = -1;
@@ -6823,7 +6822,6 @@ static void menu_icon_charge(int x, int y, uint16_t col) {
 static void menu_draw_icon(int flat_idx, int x, int y, uint16_t col) {
     switch (flat_idx) {
         case 0:  menu_icon_scanner(x, y, col);    break;
-        case 1:  menu_icon_signal(x, y, col);      break;
         case 2:  menu_icon_detections(x, y, col); break;
         case 3:  menu_icon_gps(x, y, col);        break;
         case 4:  menu_icon_stats(x, y, col);      break;
@@ -7308,7 +7306,10 @@ void handle_menu_select() {
     menu_open = false;
 
     switch (menu_selected) {
-        case 0: case 1: case 2: case 3: case 4: {
+        // No case 1: the Signal screen is reachable only by targeting a device
+        // from the scanner feed, so idx 1 is no longer a menu row. It is also
+        // already out of the ,// carousel via screen_in_carousel().
+        case 0: case 2: case 3: case 4: {
             if (export_mode_active) break;
             int target = menu_selected;
             transition_screen(target, (target >= current_screen) ? 1 : -1);
