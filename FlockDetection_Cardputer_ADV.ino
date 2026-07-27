@@ -2520,6 +2520,15 @@ void signatures_seed_defaults() {
     }
 }
 
+// Provenance for the signature database. signatures_load_from_sd() can clear
+// and replace the compiled OUI/SSID/name tables from the SD card, and used to do
+// it silently — so someone with brief access to the card could remove their own
+// hardware from the signature set and the device would keep scanning, keep
+// showing green, and simply stop detecting them. This does not prevent that.
+// It removes the silent part.
+static bool sig_loaded_from_sd = false;
+static int  sig_sd_oui = 0, sig_sd_ssid = 0, sig_sd_name = 0;
+
 void signatures_load_from_sd() {
     if (!sd_available || !SD.exists(SIG_FILE)) {
         Serial.println(F("Signatures: compiled defaults (no SD override)"));
@@ -2574,6 +2583,12 @@ void signatures_load_from_sd() {
         }
     }
     f.close();
+    // Only here — both early returns above leave sig_loaded_from_sd false, so the
+    // flag means "the file was opened and parsed", not "we looked for one".
+    sig_loaded_from_sd = true;
+    sig_sd_oui  = n_oui;
+    sig_sd_ssid = n_ssid;
+    sig_sd_name = n_name;
     Serial.printf("Signatures from SD: OUI=%d SSID=%d NAME=%d (absent types kept defaults)\n",
                   n_oui, n_ssid, n_name);
 }
@@ -2869,6 +2884,7 @@ static bool export_check_auth() {
 //   %02u = remaining seconds
 //   %d  = timer bar fill percentage (0-100)
 //   %s  = VERSION_STRING (footer)
+//   %s  = signature source, "SD" or "BUILT-IN" (footer)
 //   %lu = remaining milliseconds (for JS countdown)
 static const char EXPORT_PAGE_TEMPLATE[] PROGMEM = R"rawhtml(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -2970,7 +2986,7 @@ background:rgba(255,181,71,.12);margin-bottom:14px}
 <span class="kv2" id="tm">%um %02us</span></div>
 <div class="tb"><div class="tf" id="tf" style="width:%d%%"></div></div>
 </div></div>
-<div class="ft fi2"><span class="fd2">%s</span>
+<div class="ft fi2"><span class="fd2">%s &middot; SIGS: %s</span>
 <span class="pl po" style="font-size:10px">
 <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
 <circle cx="4" cy="4" r="3" stroke="currentColor" stroke-width="1"/>
@@ -3063,6 +3079,7 @@ void export_server_setup_routes() {
             rs,                         // %02u seconds
             fill_pct,                   // %d  timer bar width
             VERSION_STRING,             // %s  footer version
+            sig_loaded_from_sd ? "SD" : "BUILT-IN",  // %s  signature provenance
             (unsigned long)remaining_ms // %lu JS countdown seed
         );
 
@@ -11507,6 +11524,19 @@ void setup() {
     // Ungate callbacks — both WiFi and BLE were discarding packets until now.
     scanner_ready = true;
     Serial.println("[BOOT] Scanner ready — promiscuous callbacks enabled");
+
+    // Signature provenance, raised here rather than at load time. The loader runs
+    // hundreds of lines above, before the boot reveal, and the reveal repaints
+    // the whole screen — a toast set there is wiped before anyone sees it.
+    // TOAST_WARNING because a replaced signature database is "something changed",
+    // not a success: the file could just as easily have removed signatures as
+    // added them.
+    if (sig_loaded_from_sd) {
+        char sig_msg[32];
+        snprintf(sig_msg, sizeof(sig_msg), "SIGS FROM SD: %d/%d/%d",
+                 sig_sd_oui, sig_sd_ssid, sig_sd_name);
+        set_toast_direct(sig_msg, TOAST_WARNING, false);
+    }
 }
 
 // ============================================================================

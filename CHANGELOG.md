@@ -8,6 +8,32 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Security — CSV formula injection, and silent signature replacement
+
+- **CSV formula-injection guard.** A field beginning with `=`, `+`, `-` or `@`
+  executes as a formula in Excel, LibreOffice and Google Sheets, and opening
+  these logs in a spreadsheet is the documented workflow. An attacker controls
+  their own AP's SSID completely, so an SSID of `=1+1` became a live formula in
+  the operator's spreadsheet. `csv_defuse_formula()` prefixes an apostrophe on
+  `clean_name` and `clean_extra` only — after the comma strips that keep the 21
+  columns aligned. No RFC 4180 quoting: `load_sd_history()` and the
+  delete-rewrite path both parse with fixed comma offsets and would break on
+  quoted fields. Truncation bounds verified for every input length 1–79 against
+  `clean_name[64]`.
+- **Signature replacement is no longer silent.** `signatures_load_from_sd()` can
+  clear and replace the compiled OUI/SSID/name tables from the SD card. Someone
+  with brief access to the card could remove their own hardware from the
+  signature set, and the device would keep scanning, keep showing green, and
+  simply stop detecting them. This does not prevent that — it removes the silent
+  part: a `SIGS FROM SD: n/n/n` toast on boot, and `SIGS: SD` / `SIGS: BUILT-IN`
+  in the export page footer so provenance travels with anything downloaded.
+  The toast fires after the boot reveal, not at load time — the reveal repaints
+  the screen and would have wiped it. `TOAST_WARNING`, because a replaced
+  database is "something changed", not a success.
+- The CSV header row is deliberately unchanged: a provenance line ahead of it
+  would be read as a data row by both CSV parsers, which only skip lines
+  starting with `Uptime_ms`.
+
 ### Changed — WiFi config overlay
 
 - Header reads **Export Mode Configuration** instead of `WIFI CONFIG`, which
