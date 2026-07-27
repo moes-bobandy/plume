@@ -9283,10 +9283,15 @@ void draw_gps_screen() {
     float sroll = sinf(ROLL), croll = cosf(ROLL);
 
     // Project a sphere point → screen (px, py); return z-depth [-1..1]
-    auto proj = [&](float clat, float slat, float lon_r, int* px, int* py) -> float {
-        float sx = clat * cosf(lon_r);
+    // Takes longitude as a precomputed cos/sin pair rather than an angle. The
+    // meridian loop calls this 48 times with the same longitude, so computing
+    // the trig here meant 1,152 sinf/cosf per frame producing 24 distinct
+    // values. Callers now hoist it to whatever scope the longitude is constant
+    // over.
+    auto proj = [&](float clat, float slat, float clon, float slon, int* px, int* py) -> float {
+        float sx = clat * clon;
         float sy = slat;
-        float sz = clat * sinf(lon_r);
+        float sz = clat * slon;
         float rx =  sx * cr - sz * sr;   // Y-spin
         float ry =  sy;
         float rz =  sx * sr + sz * cr;
@@ -9346,10 +9351,13 @@ void draw_gps_screen() {
         bool  is_eq = (li == 2);
         const int STEPS = 72;
         int px0, py0, px1, py1;
-        float pz0 = proj(clat, slat, 0.0f, &px0, &py0);
+        float pz0 = proj(clat, slat, 1.0f, 0.0f, &px0, &py0);   // cos 0, sin 0
         for (int s = 1; s <= STEPS; s++) {
             float lon = (float)s / STEPS * 2.0f * (float)M_PI;
-            float pz1 = proj(clat, slat, lon, &px1, &py1);
+            // Longitude genuinely varies per step here, so the trig stays in the
+            // loop — it just moved out of proj() to the call site.
+            float clon = cosf(lon), slon = sinf(lon);
+            float pz1 = proj(clat, slat, clon, slon, &px1, &py1);
             float avg_z = (pz0 + pz1) * 0.5f;
             if (avg_z > 0.0f) {  // cull back-facing segments
                 float brt = avg_z * 0.45f + 0.55f;
@@ -9362,15 +9370,21 @@ void draw_gps_screen() {
 
     // ─ Longitude lines (every 30°, 12 meridians) ─
     const int N_MER = 12, M_STEPS = 48;
+    // Each meridian starts at the south pole, so this is the same latitude every
+    // time — it was evaluating trig on a literal 12 times per frame.
+    const float POLE_CLAT = cosf(-1.5707f);
+    const float POLE_SLAT = sinf(-1.5707f);
     for (int m = 0; m < N_MER; m++) {
         float lon = (float)m / N_MER * 2.0f * (float)M_PI;
+        // Longitude is constant down a meridian — once per meridian, not per step.
+        float clon = cosf(lon), slon = sinf(lon);
         int px0, py0, px1, py1;
-        float clat = cosf(-1.5707f), slat = sinf(-1.5707f);
-        float pz0 = proj(clat, slat, lon, &px0, &py0);
+        float clat = POLE_CLAT, slat = POLE_SLAT;
+        float pz0 = proj(clat, slat, clon, slon, &px0, &py0);
         for (int s = 1; s <= M_STEPS; s++) {
             float lat_r = -1.5707f + (float)s / M_STEPS * (float)M_PI;
             clat = cosf(lat_r); slat = sinf(lat_r);
-            float pz1 = proj(clat, slat, lon, &px1, &py1);
+            float pz1 = proj(clat, slat, clon, slon, &px1, &py1);
             float avg_z = (pz0 + pz1) * 0.5f;
             if (avg_z > 0.0f) {  // cull back-facing segments
                 float brt = avg_z * 0.40f + 0.50f;

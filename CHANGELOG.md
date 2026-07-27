@@ -8,6 +8,28 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Changed — GPS globe hoists per-meridian trig out of the inner loop
+
+- **`proj()` now takes longitude as a precomputed cos/sin pair** instead of an
+  angle. It was computing `cosf(lon)`/`sinf(lon)` internally on every call, and
+  the meridian loop calls it 48 times per meridian with the *same* longitude —
+  1,152 trig calls per frame producing 24 distinct values. Longitude is now
+  computed once per meridian; the latitude circles, where longitude genuinely
+  varies per step, just moved the same trig to the call site.
+- Also lifted `cosf(-1.5707f)`/`sinf(-1.5707f)` — the south-pole start latitude,
+  identical for all 12 meridians — into two constants above the loop, where it
+  was being evaluated on a literal 12 times per frame.
+- **1,184 fewer `sinf`/`cosf` per frame** (3,092 → 1,908), and the GPS screen is
+  on the 60 fps fast path, so roughly 71,000 fewer per second. Output is
+  pixel-identical: no loop restructuring, no change to `N_MER`/`M_STEPS`/`STEPS`,
+  `lats[]`, tilt/roll, the `avg_z > 0.0f` culling, or any brightness math.
+  **No additional RAM** — DRAM is unchanged at 81,632 bytes; no lookup tables
+  were added.
+- What is left is dominated by the per-step `clat`/`slat` in the meridian inner
+  loop: 1,152 calls, 60% of the remaining total. Latitude genuinely varies per
+  step so it cannot be hoisted, though note the sequence is identical across all
+  12 meridians.
+
 ### Removed — the unreachable post-boot title-card path
 
 - **`draw_title_card()` and its state are gone.** A second title-card renderer
