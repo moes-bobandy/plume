@@ -3254,7 +3254,15 @@ static void export_restore_promiscuous() {
     // Fully release WiFi resources before NimBLE init — the WiFi station
     // + TCP stack fragments heap; turning WiFi OFF lets the allocator
     // coalesce free blocks so NimBLE can get its contiguous 20-30KB.
-    WiFi.disconnect(true);
+    //
+    // Second argument is eraseap: this resolves to
+    // WiFiSTAClass::disconnect(wifioff, eraseap, timeout), so the previous
+    // single-arg form meant wifioff=true and left any NVS-cached AP config in
+    // place. Erasing it here cleans up credentials cached by builds from before
+    // WiFi.persistent(false). Deliberately NOT done in the promiscuous-mode
+    // setup path or the BLE-restart path — both run repeatedly, and erasing a
+    // config we never write is pointless flash churn.
+    WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
     delay(WIFI_MODE_SETTLE_LONG_MS);
 
@@ -3355,6 +3363,11 @@ bool export_mode_start() {
     WiFi.disconnect(true);
     delay(WIFI_MODE_SETTLE_MEDIUM_MS);
     WiFi.mode(WIFI_STA);
+    // Re-asserted here as well as in setup(). This is the one call that would
+    // write the password into NVS, so the guard sits directly against it rather
+    // than relying on a setting made a thousand lines earlier surviving every
+    // mode change in between.
+    WiFi.persistent(false);
     WiFi.begin(export_ssid, export_pass);
 
     export_connecting = true;
@@ -11101,6 +11114,15 @@ void setup() {
         Serial.println("[gps] skipped: no GNSS on regular Cardputer");
     }
     delay(WIFI_MODE_SETTLE_MEDIUM_MS);
+    // Before the first WiFi call, so it governs every later operation. The
+    // arduino-esp32 default is WIFI_STORAGE_FLASH (WiFiGenericClass::_persistent
+    // is initialised to true), which makes WiFi.begin() write the SSID and
+    // password into the nvs.net80211 namespace in plaintext, under keys
+    // ap.ssid / ap.passwd. That is a third copy of the password on the device,
+    // outside our control and unaffected by Forget WiFi. We hold the credentials
+    // ourselves and re-supply them on every connect, so the driver's cache buys
+    // nothing.
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA); delay(WIFI_MODE_SETTLE_SHORT_MS);
     boot_animate(50, "waking radios");
 
