@@ -85,7 +85,8 @@ void c5_link_end();
 void process_c5_serial();
 bool c5_is_present();
 struct WifiEvent;
-static void parse_wifi_event(struct WifiEvent* ev);
+struct IeParse;
+static void parse_wifi_event(struct WifiEvent* ev, struct IeParse* ie);
 static void update_channel_histogram();
 static void draw_scanner_viz_scan(unsigned long frame_ms);
 static void draw_scanner_viz_spectrum(unsigned long frame_ms);
@@ -5188,11 +5189,70 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type) {
     __atomic_store_n(&wifi_eq_write_idx, next, __ATOMIC_RELAXED);
 }
 
+// ── IE fingerprinting ───────────────────────────────────────────────────────
+// The set and ORDER of information elements a device emits is a property of its
+// WiFi chipset and firmware, not of its OUI. A vendor buying a new OUI block
+// invalidates every address-based signature; it does not change the silicon. So
+// an IE-order hash is a signature that survives OUI rotation.
+//
+// What this actually sees, and why that matters: payload_snap is 128 bytes, and
+// a beacon's IEs start at offset 36 (24-byte MAC header + 12 fixed params), so
+// there are at most 92 bytes of IEs available — roughly the first six to ten
+// elements. Real beacons run 200-400 bytes, so MOST are already truncated
+// before this code runs. Early IE ordering is reasonably distinctive and is the
+// part a vendor cannot casually reorder, but the vendor-specific IEs that carry
+// the most discriminating power usually sit near the tail, out of reach.
+// Raising payload_snap to 192 would capture ~156 bytes at a cost of 1,024 bytes
+// of static RAM (16 slots x 64). Not spent yet: ship at 128, record whether each
+// fingerprint was truncated, and let field data decide whether the kilobyte is
+// worth it. Measure, then buy.
+//
+// These live in an out-param rather than in WifiEvent on purpose. parse_wifi_event
+// runs on the consumer's single stack copy, so a field added to WifiEvent would
+// exist in all 16 ring slots while only ever being written in one — 128 bytes of
+// .bss for nothing. (The pre-existing ssid/vendor_ouis fields have exactly this
+// problem and cost 736 bytes; not fixed here, but that is the cheapest reclaim
+// in the struct if RAM gets tight.)
+struct IeParse {
+    uint32_t fp;         // FNV-1a over the IE tag sequence
+    uint8_t  count;      // IEs successfully walked
+    bool     truncated;  // snapshot cut the list short — fingerprint is partial
+};
+
+struct IeFingerprint {
+    uint32_t    fp;
+    uint8_t     min_ies;    // reject matches computed over fewer IEs than this
+    uint8_t     weight;     // confidence points contributed
+    const char* label;
+};
+
+// Deliberately empty. A fingerprint cannot come from a datasheet — it has to be
+// captured from real devices. With DEBUG_KEYS on, every beacon from a known OUI
+// prints its fp/count/truncated so candidates can be collected on a drive-by;
+// a value only earns a place here once the same physical unit reproduces it
+// across multiple passes. Until then this table makes the feature inert, which
+// is the correct default for a scoring input nobody has validated.
+static const IeFingerprint IE_FINGERPRINTS[] = {
+    // { 0x9A3C21F0, 6, 25, "flock_ie_fp" },
+    { 0, 0, 0, nullptr },   // sentinel — keeps the array non-empty for C++
+};
+static const int IE_FINGERPRINT_COUNT =
+    (int)(sizeof(IE_FINGERPRINTS) / sizeof(IE_FINGERPRINTS[0])) - 1;   // minus sentinel
+
 // Parse tagged parameters from a locally-copied WiFi event. Extracts SSID,
-// RSN/WPA2-PSK status, and vendor OUIs from the raw payload snapshot.
-// Called from process_wifi_event_queue() after the event has been copied
-// out of the ring buffer — never from ISR/callback context.
-static void parse_wifi_event(WifiEvent* ev) {
+// RSN/WPA2-PSK status, vendor OUIs, and the IE-order fingerprint from the raw
+// payload snapshot. Called from process_wifi_event_queue() after the event has
+// been copied out of the ring buffer — never from ISR/callback context.
+static void parse_wifi_event(WifiEvent* ev, IeParse* ie) {
+    // Cleared unconditionally, OUTSIDE the is_beacon branch below. A probe
+    // request never enters the IE walk, and leaving these uninitialized would
+    // hand the caller whatever the last event left on the stack — a garbage fp
+    // that could false-match a fingerprint if the is_beacon guard at the scoring
+    // site were ever relaxed.
+    ie->fp        = 0;
+    ie->count     = 0;
+    ie->truncated = false;
+
     // Locate the tagged parameters within the frame body.
     // Management frame: 24-byte MAC header, then frame body.
     // Beacon: 12 bytes of fixed fields (timestamp, interval, capability)
@@ -5235,10 +5295,28 @@ static void parse_wifi_event(WifiEvent* ev) {
     if (ev->is_beacon) {
         uint8_t* p = tagged_params;
         int rem = remaining;
+        uint32_t fp = 2166136261u;   // FNV-1a offset basis
+        uint8_t  ie_n = 0;
+
         while (rem >= 2) {
             uint8_t tag_id = p[0];
             uint8_t tag_len = p[1];
-            if (tag_len > rem - 2) break;
+            // A tag claiming more bytes than remain is what a mid-IE snapshot
+            // cut looks like from here, so it marks the fingerprint partial
+            // rather than just ending the walk.
+            if (tag_len > rem - 2) { ie->truncated = true; break; }
+
+            // Fold the tag id. Order matters — the ordering IS the fingerprint.
+            fp ^= tag_id;  fp *= 16777619u;
+
+            // Vendor-specific (221): fold OUI + vendor type too. These carry
+            // most of the discriminating power on the rare frames where they
+            // fit inside the snapshot.
+            if (tag_id == 221 && tag_len >= 4) {
+                for (int k = 0; k < 4; k++) { fp ^= p[2 + k]; fp *= 16777619u; }
+            }
+
+            ie_n++;
 
             // Vendor-specific IE (tag 221) — collect unique OUIs
             if (tag_id == 221 && tag_len >= 4 && ev->vendor_oui_count < 4) {
@@ -5255,6 +5333,11 @@ static void parse_wifi_event(WifiEvent* ev) {
             p += 2 + tag_len;
             rem -= 2 + tag_len;
         }
+
+        ie->fp    = fp;
+        ie->count = ie_n;
+        // Either condition means the fingerprint covers only part of the frame.
+        if (ev->payload_snap_len < ev->orig_len) ie->truncated = true;
     }
 }
 
@@ -5287,7 +5370,8 @@ void process_wifi_event_queue() {
         // This was previously done in the sniffer callback; deferring it
         // here keeps the callback fast and prevents back-pressure on the
         // WiFi driver's internal queue in dense RF environments.
-        parse_wifi_event(&local);
+        IeParse ie;
+        parse_wifi_event(&local, &ie);
 
         clean_device_name_char(local.ssid);
 
@@ -5384,6 +5468,46 @@ void process_wifi_event_queue() {
                               local.mac[0], local.mac[1], local.mac[2], local.rssi);
             }
         }
+
+        // ── IE-order fingerprint match ──
+        // Corroboration, never standalone proof. Weight is chosen so a match
+        // alone cannot cross CONFIDENCE_ALARM_THRESHOLD (70): a device whose OUI
+        // has rotated but whose fingerprint matches should read HIGH, not
+        // CERTAIN, until the fingerprint has held across many samples. Halved on
+        // a truncated frame, because a hash over six IEs out of twenty is a
+        // weaker claim than one over the whole set.
+        //
+        // The ie_count >= 4 floor is separate from each entry's min_ies: it
+        // rejects the degenerate case where a snapshot caught almost nothing, so
+        // the collision space is too small for a match to mean anything.
+        if (local.is_beacon && ie.count >= 4) {
+            for (int i = 0; i < IE_FINGERPRINT_COUNT; i++) {
+                if (IE_FINGERPRINTS[i].fp == ie.fp &&
+                    ie.count >= IE_FINGERPRINTS[i].min_ies) {
+                    int w = IE_FINGERPRINTS[i].weight;
+                    if (ie.truncated) w /= 2;
+                    confidence += w;
+                    strlcat(methods, IE_FINGERPRINTS[i].label, sizeof(methods));
+                    strlcat(methods, " ", sizeof(methods));
+                    break;
+                }
+            }
+        }
+
+#if DEBUG_KEYS
+        // Fingerprint collection. Prints only for beacons from an OUI already in
+        // rt_oui[], so a drive-past of known units yields candidates without
+        // burying them in ambient traffic. A value is only trustworthy once the
+        // same physical unit reproduces it across passes — if it varies, check
+        // ie_count first: a fingerprint that moves because the frame was cut at
+        // a different point is a measurement artifact, not a rotating IE set.
+        if (local.is_beacon && mac_score > 0 && ie.count > 0) {
+            Serial.printf("IE-FP %s fp=%08lX ies=%u trunc=%d snap=%u/%u\n",
+                          mac_str, (unsigned long)ie.fp, (unsigned)ie.count,
+                          ie.truncated ? 1 : 0,
+                          (unsigned)local.payload_snap_len, (unsigned)local.orig_len);
+        }
+#endif
 
         if (confidence > 0 && local.rssi > -50) confidence += SCORE_BONUS_RSSI;
 
