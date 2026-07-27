@@ -1562,14 +1562,22 @@ void LedTask(void* pv) {
         } else {
             led_detect_active = false;
             bool export_on = (export_mode_active || export_connecting);
-            // brightness_level >= 3 is a HARDWARE constraint, not a preference:
-            // the WS2812 is powered off the backlight boost rail (GPIO 38 PWM)
-            // and physically cannot light unless the backlight is at full duty
-            // — see the same note in run_charge_mode(). Below 4/4 the LED is
-            // dark whatever we write to it, so gating here keeps software state
-            // honest instead of driving a pin that can't respond.
+            // No brightness gate here, deliberately.
+            //
+            // On the ADV the WS2812 is powered off the backlight boost rail
+            // (GPIO 38 PWM) and physically cannot light unless the backlight is
+            // at full duty — see the same note in run_charge_mode(). That is why
+            // ADV users see no LED below 4/4 brightness, and it is not a bug:
+            // the constraint is self-enforcing in hardware, so a software gate
+            // added nothing except a second place for the rule to live.
+            //
+            // It also actively hurt on other Cardputer revisions. One binary runs
+            // on both boards (see plume_is_adv), and the original Cardputer wires
+            // its LED differently — there the gate suppressed an LED that may
+            // work at any brightness. Dropping it costs the ADV nothing and
+            // stops us overriding hardware we cannot test.
             bool show_led = !night_mode &&
-                            (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
+                            (export_on || (led_breathing_on && !low_power_mode));
             if (show_led) {
                 float breath = anim_pulse(export_on ? UI_PULSE_MEDIUM : UI_PULSE_BREATHE);
                 float dim    = export_on ? (0.30f + breath * 0.55f) : (0.15f + breath * 0.35f);
@@ -10504,13 +10512,15 @@ static void c5_push_led_state(bool force) {
     static int last_on = -1, last_r = -1, last_g = -1, last_b = -1;
 
     bool export_on = (export_mode_active || export_connecting);
-    // Keep brightness_level >= 3 here too. The C5's LED has its own supply and
-    // COULD light at any brightness — but the Cardputer's physically cannot
-    // (backlight boost rail), so holding the C5 to the same condition is what
-    // makes the pair behave as one instrument rather than the C5 glowing beside
-    // a Cardputer that has gone dark.
+    // Condition is copied from LedTask verbatim, and must stay that way — the
+    // whole point is that the pair reads as one instrument. The brightness gate
+    // was dropped from both together: the C5's LED has its own supply and could
+    // always light at any brightness, and the Cardputer's dependency on the
+    // backlight boost rail enforces itself in hardware without our help. If a
+    // gate is ever reintroduced on one side, it has to be reintroduced here too,
+    // or the C5 glows beside a dark Cardputer (or the reverse).
     bool on = !night_mode
-              && (export_on || (led_breathing_on && brightness_level >= 3 && !low_power_mode));
+              && (export_on || (led_breathing_on && !low_power_mode));
     int r = export_on ? 255 : (int)led_r;
     int g = export_on ? 130 : (int)led_g;
     int b = export_on ?   0 : (int)led_b;
