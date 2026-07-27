@@ -8,6 +8,28 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Changed — WiFi config overlay
+
+- Header reads **Export Mode Configuration** instead of `WIFI CONFIG`, which
+  says what the screen is for rather than what it edits. Mixed case is
+  deliberate and does not match the other overlay headers.
+- **Outer card border removed.** The header strip already frames the screen, so
+  the rounded rect boxed in an already-bounded panel. The `cx/cy/cw/ch` geometry
+  stays — every field, label and button positions off it. Selection is still
+  shown by border colour and never by fill, which is what keeps the form
+  readable without the card.
+- `PASS` label spelled out to `PASSWORD`.
+- **`(not set)` placeholders no longer dimmed.** For a user who has not
+  configured WiFi, that placeholder is the most actionable thing on screen, and
+  `DIM_COLOR` read as disabled. Uses `TEXT_COLOR`, not a literal white — the
+  token is `#FFD0D0` in the red night palette, and hardcoding white would blow
+  out night vision.
+- **DEL closes the overlay when not typing.** It previously jumped into editing
+  mode and deleted the last character, so the one key that closes every other
+  overlay instead silently mutated the field under the cursor. Backspace while
+  editing is unchanged, and the close path clears `wifi_config_show_pass` like
+  every other exit, so a revealed password is masked again on reopen.
+
 ### Added — C5 link orientation auto-detection
 
 - **A reversed Grove cable now just works.** Swapping yellow and white is the

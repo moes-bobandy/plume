@@ -6459,7 +6459,7 @@ static void render_frame() {
         } else if (show_help_overlay) {
             draw_overlay_header_lcd("HELP");
         } else if (wifi_config_open) {
-            draw_overlay_header_lcd("WIFI CONFIG");
+            draw_overlay_header_lcd("Export Mode Configuration");
         } else if (export_mode_active) {
             draw_header_lcd(current_screen, "EXPORT");
         } else {
@@ -7058,11 +7058,14 @@ void draw_wifi_config_overlay() {
 
     spr.fillSprite(BG_COLOR);
 
-    // Outer card — outline only on BG, matching the lighter feel of the
-    // stats and detections screens. Selected fields/buttons are
-    // distinguished by border color, never by fill.
+    // No outer card. The form sits directly on BG; the header strip already
+    // frames the screen, so a second outline just boxed in an already-bounded
+    // panel. Selected fields/buttons are distinguished by border color, never
+    // by fill — that still holds and is what makes the selection readable
+    // without the card.
+    //
+    // cx/cy/cw/ch stay: every field, label and button below positions off them.
     int cx = 4, cy = UI_PAD_XS, cw = DISP_W - 8, ch = SPR_H - UI_PAD_SM;
-    spr.drawRoundRect(cx, cy, cw, ch, 4, ea(HEADER_COLOR));
 
     unsigned long now_ms = millis();
     bool cursor_visible = ((now_ms / 500) % 2 == 0);
@@ -7084,7 +7087,11 @@ void draw_wifi_config_overlay() {
     const char* ssid_display = wifi_config_ssid_buf;
     bool ssid_empty = (strlen(ssid_display) == 0);
 
-    spr.setTextColor(ssid_empty ? ea(DIM_COLOR) : ea(TEXT_COLOR), BG_COLOR);
+    // Placeholder is NOT dimmed: "(not set)" is the most actionable thing on
+    // the screen for a user who has not configured WiFi yet, and dimming it
+    // read as disabled. TEXT_COLOR not a literal white — it is #FFD0D0 in the
+    // red night palette, and hardcoding white would blow out night vision.
+    spr.setTextColor(ea(TEXT_COLOR), BG_COLOR);
     spr.setTextSize(TS_MICRO);
     spr.setCursor(cx + 9, input_y + 4);
 
@@ -7109,7 +7116,7 @@ void draw_wifi_config_overlay() {
     spr.setTextColor(ea(ACCENT_COLOR), BG_COLOR);
     spr.setTextSize(TS_MICRO);
     spr.setCursor(cx + 6, field_y);
-    kprint(spr, "PASS");
+    kprint(spr, "PASSWORD");
 
     input_y = field_y + 12;
     uint16_t pass_border = pass_selected ? ea(HEADER_COLOR) : ea(CARD_BORDER);
@@ -7118,7 +7125,7 @@ void draw_wifi_config_overlay() {
     const char* pass_src = wifi_config_pass_buf;
     bool pass_empty = (strlen(pass_src) == 0);
 
-    spr.setTextColor(pass_empty ? ea(DIM_COLOR) : ea(TEXT_COLOR), BG_COLOR);
+    spr.setTextColor(ea(TEXT_COLOR), BG_COLOR);   // see the SSID note above
     spr.setTextSize(TS_MICRO);
     spr.setCursor(cx + 9, input_y + 4);
 
@@ -12689,18 +12696,16 @@ static void handle_keyboard_input() {
                         }
                         wifi_config_cursor--;
                     }
-                } else if (wifi_config_field <= 1) {
-                    // On a text field — enter editing mode and backspace the last char
-                    char* buf = (wifi_config_field == 0) ? wifi_config_ssid_buf : wifi_config_pass_buf;
-                    int cur_len = strlen(buf);
-                    if (cur_len > 0) {
-                        wifi_config_editing = true;
-                        wifi_config_cursor  = cur_len;
-                        buf[--wifi_config_cursor] = '\0';
-                    }
-                    // Empty field: no-op — use ESC to close
+                } else {
+                    // Not typing — DEL is the universal "close / go back", and
+                    // this overlay is a thing to close. It used to instead jump
+                    // into editing mode and eat the last character, which meant
+                    // the one key that closes everything else silently mutated
+                    // the field you were sitting on.
+                    wifi_config_open      = false;
+                    wifi_config_show_pass = false;   // never persist plaintext reveal
+                    screen_dirty          = true;
                 }
-                // DEL never closes the overlay; use ESC for that
                 draw_current_screen(); render_frame();
             } else if (show_feed_expanded) {
                 show_feed_expanded = false;
