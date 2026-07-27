@@ -11899,7 +11899,19 @@ static void handle_keyboard_input() {
                             wifi_config_open = false;
                             wifi_config_show_pass = false;  // never persist plaintext reveal
                         }
-                    } else if (c == 0x1B) {
+                    } else if (c == 0x1B || c == '`') {
+                        // Accept a BARE '`' as well as the translated 0x1B. The
+                        // key labelled "esc" is the '`' key and only reports
+                        // status.fn when the Fn chord is held, so pressing the
+                        // key the footer tells you to press ("ESC close") never
+                        // reached the 0x1B branch — it fell through every case
+                        // here and did nothing.
+                        //
+                        // Safe in navigation mode only: '`' is mute globally, but
+                        // the overlay swallows every key, so it has no other
+                        // meaning here. Editing mode deliberately still requires
+                        // Fn+` — '`' is a legitimate character in an SSID or
+                        // password and must stay typable.
                         wifi_config_open = false;
                         wifi_config_show_pass = false;  // never persist plaintext reveal
                     }

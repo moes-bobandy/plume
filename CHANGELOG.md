@@ -8,6 +8,20 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Fixed — ESC did not close the WiFi config overlay
+
+- **The key labelled `esc` now backs out of WiFi config.** The overlay footer
+  said "ESC close" and a `0x1B` handler was there to do it, but the key never
+  produced `0x1B`: on the Cardputer the esc key *is* the `` ` `` key, and the
+  translation above the handler (`if (status.fn && c == 0x60) c = 0x1B`) only
+  fires when the Fn chord is held. A bare press arrived as `` ` ``, matched no
+  branch in navigation mode, and was swallowed — so the documented way out of
+  the screen did nothing unless you knew to press Fn+`.
+- Navigation mode now accepts a bare `` ` `` as well as `0x1B`. Editing mode
+  deliberately still requires the Fn chord: `` ` `` is a valid character in an
+  SSID or password and has to stay typable, so trading that away to save a
+  chord would be the wrong fix.
+
 ### Removed — the manual Charge Mode entry path
 
 Charge Mode itself **stays**, and its automatic entry is untouched: below
