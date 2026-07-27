@@ -211,11 +211,7 @@ unsigned long vol_overlay_start = 0;
 bool show_vol_overlay = false;
 static bool show_feed_expanded = false;
 static unsigned long feed_expand_ms = 0;
-static bool          title_card_active   = true;
-static unsigned long title_card_start_ms = 0;
 static volatile bool scanner_ready       = false;  // set true after boot; guards both callbacks
-static const unsigned long TITLE_CARD_HOLD_MS = 500;   // boot sequence already did the real hold
-static const unsigned long TITLE_CARD_FADE_MS = 1000;
 static int  feed_expanded_selected = 0;
 // Scroll offset for the expanded feed — index of the row drawn at the top.
 // Without this the renderer always started at the newest entry and drew at most
@@ -6757,23 +6753,6 @@ static void draw_title_card_impl(lgfx::LovyanGFX& g, float alpha, int h) {
 }
 static void draw_title_card_overlay(float alpha) { draw_title_card_impl(spr, alpha, SPR_H); }
 
-static void draw_title_card() {
-    unsigned long elapsed = millis() - title_card_start_ms;
-    unsigned long total = TITLE_CARD_HOLD_MS + TITLE_CARD_FADE_MS;
-
-    if (elapsed >= total) {
-        title_card_active = false;
-        return;
-    }
-
-    float alpha = 1.0f;
-    if (elapsed > TITLE_CARD_HOLD_MS) {
-        alpha = 1.0f - (float)(elapsed - TITLE_CARD_HOLD_MS) / (float)TITLE_CARD_FADE_MS;
-    }
-
-    draw_title_card_overlay(alpha);
-}
-
 // ── Fullscreen single-column scrollable menu ────────────────────────
 static void draw_menu_overlay() {
     float alpha = ui_progress(menu_open_ms, UI_FADE_IN_MS);
@@ -9918,7 +9897,6 @@ void draw_current_screen() {
         switch (current_screen) {
             case 0:
                 draw_scanner_screen();
-                if (title_card_active) draw_title_card();
                 break;
             case 1: draw_signal_screen();           break;
             case 2: draw_capture_history_screen(); break;
@@ -11245,12 +11223,6 @@ void setup() {
 
         // Phase 4: Dissolve dark → scanner over 1 second
         {
-            // The dissolve draws the card itself below — clear
-            // title_card_active so draw_current_screen() doesn't paint a
-            // second copy at its own (different) alpha timeline, which also
-            // left the card popping off half-faded when the dissolve ended.
-            title_card_active = false;
-            title_card_start_ms = millis();
             unsigned long dissolve_start = millis();
             unsigned long dissolve_ms = 1000;
 
@@ -11812,7 +11784,7 @@ static void service_stats_render() {
 
         if (menu_open ||
             current_screen == 0 || current_screen == 1 || current_screen == 3 ||
-            show_vol_overlay || toast_active || title_card_active || stats_scrolling || stats_rolling ||
+            show_vol_overlay || toast_active || stats_scrolling || stats_rolling ||
             hist_animating ||
             (now - last_fast_anim < 30)) {
             // Stats screen caps at 30 fps to suppress the SPI/scan-line
@@ -11856,10 +11828,6 @@ static void handle_keyboard_input() {
             display_wake_from_idle();
             // Same I2S wake as the BtnA path.
             M5Cardputer.Speaker.stop();
-        }
-        if (title_card_active) {
-            title_card_active = false;
-            screen_dirty = true;
         }
         Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
         

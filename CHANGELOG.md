@@ -8,6 +8,21 @@ The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and
 a privacy fix in the export page. Cardputer sketch only — `c5-sniffer/` is
 unchanged from v1.2 and does not need reflashing.
 
+### Removed — the unreachable post-boot title-card path
+
+- **`draw_title_card()` and its state are gone.** A second title-card renderer
+  existed for showing the card *after* boot, with its own hold/fade timeline
+  (`TITLE_CARD_HOLD_MS`, `TITLE_CARD_FADE_MS`) driven from `draw_current_screen()`
+  case 0. It could never run: `setup()` phase 4 clears `title_card_active` before
+  returning, the boot reveal is unconditional, and `run_charge_mode()` returns
+  into a normal boot — so the flag is always false by the time `loop()` starts.
+  Also removed the now-dead `title_card_active` term in the render fast-path
+  condition and the keypress-wake block that cleared it.
+- The boot card itself is untouched. `draw_title_card_overlay()`,
+  `draw_title_card_impl()`, and `draw_title_grid()` are all live — the overlay
+  draws the card during the Phase 2 reveal *and* during the Phase 4 dissolve, and
+  both call sites remain. No behavioural change.
+
 ### Changed — boot is ~2 seconds shorter
 
 - **Dropped the title-card hold.** Phase 3 sat on the finished card for a flat
