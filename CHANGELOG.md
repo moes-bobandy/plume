@@ -2,6 +2,18 @@
 
 All notable changes to Plume are recorded here.
 
+## [Unreleased] — dual-screen + Launcher
+
+### Added
+- Optional external ILI9341 dual-screen support (`DualDisplay.h`, compile flag `PLUME_DUAL_SCREEN`).
+- Launcher install docs in `docs/LAUNCHER.md` (app-only `.bin` for bmorcelli/Launcher).
+- Secondary EXT feed summary on external panel when dual-screen is enabled; internal UI unchanged.
+- Soft GPS skip when DualDisplay claims pins 13/15.
+
+### Notes
+- Default remains single-screen (`PLUME_DUAL_SCREEN=0`).
+- Heap-safe: no full-frame external sprite; draws skipped under ~6KB free heap.
+
 ## v1.3
 
 The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and

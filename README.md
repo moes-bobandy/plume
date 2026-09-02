@@ -433,6 +433,25 @@ This project builds on work from the surveillance detection community:
 - **LittleFS corruption** can happen on hard power loss. The firmware auto-recovers via `LittleFS.begin(true)` with partition erase fallback, but persisted settings reset to defaults.
 - **Dedup window.** Same device is only alerted once per 5-minute window (30 seconds in turbo). Re-detections within the window are silently logged for RSSI tracking but don't trigger alarms.
 
+
+## Dual Screen + Launcher
+
+## Dual Screen (optional)
+
+Plume can drive an external **ILI9341** (320×240) on Cardputer ADV in addition to the built-in ST7789. The primary UI stays on the internal LCD; the external panel shows a live device-feed / detections summary.
+
+- Module: `DualDisplay.h` — enable with `#define PLUME_DUAL_SCREEN 1` (default **0** = upstream single-screen + GPS)
+- Wiring, pin conflicts (GPS / SD), and heap notes: **[docs/LAUNCHER.md](docs/LAUNCHER.md)**
+- Init order: `M5Cardputer.begin` → internal display setup → `DualDisplay::begin()` → `setRotation(7)` on success
+
+## Launcher install (bmorcelli)
+
+Install Plume from SD using [bmorcelli Launcher](https://github.com/bmorcelli/Launcher) with an **app-only** `.bin` at offset **0x10000**. Do **not** flash merged bootloader+partitions images through Launcher.
+
+Full steps (Arduino export, SD copy, Reset to return): **[docs/LAUNCHER.md](docs/LAUNCHER.md)**
+
+See also [`docs/LAUNCHER.md`](docs/LAUNCHER.md).
+
 ## Legal
 
 **This software is provided "as is" without warranty of any kind.** The authors accept no responsibility for any use, misuse, or consequences. You use Plume entirely at your own risk.

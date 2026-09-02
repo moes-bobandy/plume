@@ -1,8 +1,9 @@
 ﻿// ============================================================================
-// PLUME v1.3
+// PLUME v1.3.1
 // ============================================================================
 
 #include <M5Cardputer.h>
+#include "DualDisplay.h"  // optional external ILI9341 (ADV)
 
 // ── Target guard ────────────────────────────────────────────────────────────
 // This repo holds TWO firmwares for TWO different chips: this sketch (ESP32-S3,
@@ -723,8 +724,8 @@ static inline unsigned long current_dedup_window_ms() {
 // shows a version derives from these (stats card, boot screen, export page
 // badge and footer), so no other source line needs touching.
 // Also update: CHANGELOG.md, README.md footer, and the file header above.
-#define VERSION_STRING "PLUME v1.3"
-#define VERSION_SHORT  "v1.3"
+#define VERSION_STRING "PLUME v1.3.1"
+#define VERSION_SHORT  "v1.3.1"
 
 // Set to 1 to enable the 'x' key simulation trigger (development only).
 // MUST be 0 for release builds — simulation creates permanent fake
@@ -7318,6 +7319,11 @@ void handle_menu_select() {
         case 5:
             night_mode = !night_mode;
             apply_color_palette();
+
+    // Optional external ILI9341 (guicmg pinout). After M5 begin + internal
+    // rotation; graceful single-screen fallback if absent. Claims GPIO 5/13/15
+    // (CS/RST/DC) - see DualDisplay.h / docs/LAUNCHER.md for SD+GPS notes.
+    DualDisplay::begin();
             schedule_persist();
             screen_dirty = true;
             break;
@@ -12045,6 +12051,41 @@ static void service_ble_restart() {
 
 static void redraw_now() { draw_current_screen(); render_frame(); }
 
+
+// Push a heap-safe secondary view to the optional external ILI9341.
+// Primary UI stays on the internal LCD. No PSRAM / no full-frame sprite.
+static void dual_display_service() {
+    if (!DualDisplay::present()) return;
+    uint32_t free_heap = (uint32_t)esp_get_free_heap_size();
+    if (free_heap < DualDisplay::MIN_HEAP_DRAW) return;
+
+    DualDisplay::FeedRow rows[FEED_SIZE];
+    int nrows = 0;
+    long sw = 0, sb = 0, life = 0;
+
+    if (take_data_mutex()) {
+        sw = session_flock_wifi;
+        sb = session_flock_ble;
+        life = lifetime_flock_total;
+        int n = feed_count;
+        if (n > FEED_SIZE) n = FEED_SIZE;
+        for (int i = 0; i < n; i++) {
+            int idx = (feed_head - i + FEED_SIZE * 2) % FEED_SIZE;
+            const FeedEntry& e = feed_entries[idx];
+            DualDisplay::FeedRow& r = rows[nrows++];
+            strncpy(r.name, e.name, sizeof(r.name) - 1);
+            r.name[sizeof(r.name) - 1] = '\0';
+            r.rssi = e.rssi;
+            r.proto = e.proto;
+            r.is_flock = e.is_flock;
+        }
+        give_data_mutex();
+    }
+
+    DualDisplay::pushFeedSummary(sw, sb, life, rows, nrows, free_heap);
+}
+
+
 static void service_stats_render() {
     if (screen_off_mode) return;   // panel asleep — compositing would be wasted
     if (ambient_mode) {
@@ -12134,6 +12175,7 @@ static void service_stats_render() {
             }
         }
     }
+    dual_display_service();
 }
 
 static void handle_keyboard_input() {
