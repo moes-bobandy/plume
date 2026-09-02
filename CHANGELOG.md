@@ -2,6 +2,21 @@
 
 All notable changes to Plume are recorded here.
 
+## Unreleased / v1.3.1
+
+### Added — Dual Screen + bmorcelli Launcher docs
+
+- **Optional external ILI9341** on Cardputer ADV via `DualDisplay.h` (guicmg pinout: CS=5, RST=13, DC=15, MOSI=14, SCK=40). Gated by `PLUME_DUAL_SCREEN` (default 0). When enabled: init after `M5Cardputer.begin`, `setRotation(7)`. No MISO — enable only when wired.
+- Secondary view: live feed / detections summary on the external panel (direct draw, no full-frame sprite). Primary UI remains on the internal LCD. External refresh skips when free heap < 6KB.
+- When the external panel is present, **GPS UART init is skipped** (pins 13/15 are RST/DC). Documented in `docs/LAUNCHER.md`.
+- **`docs/LAUNCHER.md`**: build app-only `.bin` for Launcher at `0x10000`, SD install steps, wiring table, Reset-to-Launcher, heap risks.
+- README: Dual Screen + Launcher sections linking the doc.
+
+### Notes
+
+- Detection / RF paths are unchanged. Dual-screen is display-only.
+- Shared SPI with SD (FSPI); avoid overlapping SD I/O with external draws.
+
 ## v1.3
 
 The Signal screen, rebuilt against the `design_handoff_signal_screen` spec, and

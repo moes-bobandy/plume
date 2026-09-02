@@ -13,6 +13,7 @@ No network connection. No cloud. Everything runs locally on the device. It recei
 - **M5Cardputer ADV** (ESP32-S3, no PSRAM variant supported)
 - **GPS module** via UART (pins 15/13, 115200 baud) — NEO-6M, BN-220, or similar
 - **MicroSD card** (FAT32, any size) — for detection logs, packet captures, and stats
+- **Optional ILI9341** external display (SPI) — see [Dual Screen](#dual-screen-optional) / [docs/LAUNCHER.md](docs/LAUNCHER.md)
 
 ## Flashing
 
@@ -424,6 +425,21 @@ This project builds on work from the surveillance detection community:
 
 ---
 
+
+## Dual Screen (optional)
+
+Plume can drive an external **ILI9341** (320×240) on Cardputer ADV in addition to the built-in ST7789. The primary UI stays on the internal LCD; the external panel shows a live device-feed / detections summary.
+
+- Module: `DualDisplay.h` — enable with `#define PLUME_DUAL_SCREEN 1` (default **0** = upstream single-screen + GPS)
+- Wiring, pin conflicts (GPS / SD), and heap notes: **[docs/LAUNCHER.md](docs/LAUNCHER.md)**
+- Init order: `M5Cardputer.begin` → internal display setup → `DualDisplay::begin()` → `setRotation(7)` on success
+
+## Launcher install (bmorcelli)
+
+Install Plume from SD using [bmorcelli Launcher](https://github.com/bmorcelli/Launcher) with an **app-only** `.bin` at offset **0x10000**. Do **not** flash merged bootloader+partitions images through Launcher.
+
+Full steps (Arduino export, SD copy, Reset to return): **[docs/LAUNCHER.md](docs/LAUNCHER.md)**
+
 ## Known Limitations
 
 - **No PSRAM.** The device runs on ~17 KB of free heap after all subsystems initialize. Memory-intensive operations manage heap carefully but can fail under extreme conditions. Auto-restart at 3KB free, SD/LittleFS writes skipped below 6KB.
@@ -451,4 +467,4 @@ MIT — see [LICENSE](LICENSE) for full text.
 
 ---
 
-**v1.3**
+**v1.3.1**
